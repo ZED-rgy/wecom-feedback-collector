@@ -26,6 +26,8 @@ python -m wecom_feedback run --once
 
 `python -m wecom_feedback run` 是长期运行入口。当前默认使用未配置适配器和 dry-run 发送器；接入真实会话存档与 Windows 发送器后，只需在启动装配处替换适配器，不需要改动采集、整理和任务队列逻辑。
 
+真实接入所需信息见 [真实企微接入清单](docs/REAL_INTEGRATION_CHECKLIST.md)。
+
 `WECOM_DRY_RUN=true` 时不会发送真实消息，也不会调用外部企微服务。正式接入前需要配置目标群 `roomid`、账号 ID/名称，并确认会话存档已对该账号开放。
 
 ## 目录结构
