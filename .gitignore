@@ -7,3 +7,4 @@ data/
 logs/
 *.db
 *.sqlite3
+*.egg-info/
