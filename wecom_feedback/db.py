@@ -208,6 +208,15 @@ class Database:
                 result[table] = int(conn.execute(f"SELECT COUNT(*) AS n FROM {table}").fetchone()["n"])
             return result
 
+    def list_jobs(self, limit: int = 100) -> list[dict[str, object]]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT job_id, room_id, content, scheduled_at, status, retry_count, last_error "
+                "FROM send_jobs ORDER BY scheduled_at DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+            return [dict(row) for row in rows]
+
     def claim_due_jobs(self, limit: int = 10) -> list[SendJob]:
         now = datetime.now(timezone.utc).isoformat()
         with self.connect() as conn:

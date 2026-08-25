@@ -5,6 +5,23 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
+ENV_FILE = Path(".env")
+
+
+def load_dotenv(path: Path = ENV_FILE) -> None:
+    """Load simple KEY=VALUE pairs without adding a third-party dependency."""
+    if not path.exists():
+        return
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        os.environ.setdefault(key, value)
+
+
 def _bool_env(name: str, default: bool) -> bool:
     value = os.getenv(name)
     if value is None:
@@ -35,6 +52,7 @@ class Settings:
 
     @classmethod
     def from_env(cls) -> "Settings":
+        load_dotenv()
         return cls(
             database_path=Path(os.getenv("WECOM_DATABASE_PATH", "data/feedback.db")),
             archive_enabled=_bool_env("WECOM_ARCHIVE_ENABLED", False),
@@ -68,3 +86,49 @@ class Settings:
                 if not value:
                     missing.append(field)
         return missing
+
+    def public_dict(self) -> dict[str, object]:
+        return {
+            "database_path": str(self.database_path),
+            "archive_enabled": self.archive_enabled,
+            "archive_corp_id": self.archive_corp_id,
+            "archive_secret_configured": bool(self.archive_secret),
+            "archive_private_key_path": self.archive_private_key_path,
+            "target_room_id": self.target_room_id,
+            "target_group_name": self.target_group_name,
+            "target_group_remark": self.target_group_remark,
+            "target_account_id": self.target_account_id,
+            "target_account_names": ", ".join(self.target_account_names),
+            "context_window_seconds": self.context_window_seconds,
+            "summary_times": ", ".join(self.summary_times),
+            "dry_run": self.dry_run,
+        }
+
+
+def save_env(values: dict[str, object], path: Path = ENV_FILE) -> None:
+    """Persist dashboard-editable values; blank secrets leave existing secrets unchanged."""
+    load_dotenv(path)
+    mapping = {
+        "WECOM_DATABASE_PATH": values.get("database_path", "data/feedback.db"),
+        "WECOM_ARCHIVE_ENABLED": str(values.get("archive_enabled", False)).lower(),
+        "WECOM_ARCHIVE_CORP_ID": values.get("archive_corp_id", ""),
+        "WECOM_ARCHIVE_PRIVATE_KEY_PATH": values.get("archive_private_key_path", ""),
+        "WECOM_TARGET_ROOM_ID": values.get("target_room_id", ""),
+        "WECOM_TARGET_GROUP_NAME": values.get("target_group_name", ""),
+        "WECOM_TARGET_GROUP_REMARK": values.get("target_group_remark", ""),
+        "WECOM_TARGET_ACCOUNT_ID": values.get("target_account_id", ""),
+        "WECOM_TARGET_ACCOUNT_NAMES": values.get("target_account_names", ""),
+        "WECOM_CONTEXT_WINDOW_SECONDS": values.get("context_window_seconds", 90),
+        "WECOM_SUMMARY_TIMES": values.get("summary_times", "12:00,18:00"),
+        "WECOM_DRY_RUN": str(values.get("dry_run", True)).lower(),
+    }
+    secret = str(values.get("archive_secret", "")).strip()
+    if secret:
+        mapping["WECOM_ARCHIVE_SECRET"] = secret
+    elif os.getenv("WECOM_ARCHIVE_SECRET"):
+        mapping["WECOM_ARCHIVE_SECRET"] = os.environ["WECOM_ARCHIVE_SECRET"]
+    lines = ["# Managed by the local WeCom feedback dashboard", ""]
+    lines.extend(f"{key}={str(value).strip()}" for key, value in mapping.items())
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    for key, value in mapping.items():
+        os.environ[key] = str(value)

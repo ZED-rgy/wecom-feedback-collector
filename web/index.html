@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>企微反馈收集控制台</title>
+  <style>
+    :root { --bg:#f5f7fb; --card:#fff; --ink:#172033; --muted:#6b7485; --line:#e5e9f1; --brand:#2563eb; --ok:#15803d; --warn:#b45309; }
+    * { box-sizing:border-box; } body { margin:0; background:var(--bg); color:var(--ink); font:14px/1.6 system-ui,-apple-system,"Microsoft YaHei",sans-serif; }
+    .shell { max-width:1180px; margin:0 auto; padding:28px 20px 48px; } header { display:flex; justify-content:space-between; align-items:flex-end; gap:20px; margin-bottom:22px; }
+    h1 { margin:0 0 4px; font-size:26px; letter-spacing:-.03em; } h2 { margin:0 0 16px; font-size:17px; } p { margin:0; } .muted { color:var(--muted); }
+    .grid { display:grid; grid-template-columns:repeat(12,1fr); gap:16px; } .card { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:20px; box-shadow:0 6px 20px rgba(23,32,51,.04); }
+    .span-4 { grid-column:span 4; } .span-8 { grid-column:span 8; } .span-12 { grid-column:span 12; }
+    .metrics { display:grid; grid-template-columns:repeat(3,1fr); gap:10px; } .metric { border:1px solid var(--line); border-radius:10px; padding:12px; } .metric strong { display:block; font-size:24px; }
+    .status { display:flex; align-items:center; gap:8px; font-weight:600; } .dot { width:9px; height:9px; border-radius:50%; background:#94a3b8; } .dot.ok { background:var(--ok); } .dot.bad { background:#dc2626; }
+    form { display:grid; grid-template-columns:repeat(2,1fr); gap:12px 16px; } label { display:flex; flex-direction:column; gap:5px; color:var(--muted); font-size:12px; } input, textarea { width:100%; border:1px solid #d9dfeb; border-radius:8px; padding:9px 10px; color:var(--ink); background:#fff; font:inherit; } textarea { min-height:88px; resize:vertical; }
+    .full { grid-column:1/-1; } .check { flex-direction:row; align-items:center; gap:8px; } .check input { width:auto; } button { border:0; border-radius:8px; padding:9px 14px; background:var(--brand); color:#fff; cursor:pointer; font:inherit; } button.secondary { background:#eef3ff; color:#1d4ed8; } button.ghost { background:#f0f2f6; color:#334155; }
+    .actions { display:flex; gap:8px; flex-wrap:wrap; margin-top:14px; } .notice { padding:10px 12px; border-radius:8px; background:#fff8eb; color:var(--warn); margin-top:12px; }
+    table { width:100%; border-collapse:collapse; } th,td { text-align:left; padding:10px 8px; border-bottom:1px solid var(--line); vertical-align:top; } th { color:var(--muted); font-size:12px; font-weight:600; } td small { color:var(--muted); }
+    .tag { display:inline-block; padding:2px 7px; border-radius:999px; background:#eef3ff; color:#1d4ed8; font-size:12px; } .empty { color:var(--muted); text-align:center; padding:22px; }
+    @media (max-width:850px) { .span-4,.span-8 { grid-column:span 12; } form { grid-template-columns:1fr; } }
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <header><div><h1>企微反馈收集控制台</h1><p class="muted">本机配置、运行状态与摘要发送</p></div><button class="ghost" onclick="refresh()">刷新状态</button></header>
+    <section class="grid">
+      <article class="card span-4"><h2>运行状态</h2><div id="status" class="status"><span class="dot"></span>读取中…</div><div id="status-note" class="notice" style="display:none"></div><div class="metrics" style="margin-top:18px"><div class="metric"><strong id="raw-count">0</strong><span class="muted">原始消息</span></div><div class="metric"><strong id="feedback-count">0</strong><span class="muted">反馈记录</span></div><div class="metric"><strong id="job-count">0</strong><span class="muted">发送任务</span></div></div></article>
+      <article class="card span-8"><h2>配置</h2><form id="settings-form">
+        <label>数据库路径<input name="database_path" /></label>
+        <label>目标群 roomid<input name="target_room_id" placeholder="例如 wrxxxxxxxx" /></label>
+        <label>群名称<input name="target_group_name" /></label>
+        <label>群备注（用于发送前校验）<input name="target_group_remark" /></label>
+        <label>企微账号 ID<input name="target_account_id" /></label>
+        <label>企微账号名称（逗号分隔）<input name="target_account_names" placeholder="系统反馈助手,小王" /></label>
+        <label>上下文窗口（秒）<input name="context_window_seconds" type="number" min="10" /></label>
+        <label>摘要时间（逗号分隔）<input name="summary_times" placeholder="12:00,18:00" /></label>
+        <label>会话存档 Corp ID<input name="archive_corp_id" /></label>
+        <label>会话存档 Secret（留空表示不修改）<input name="archive_secret" type="password" autocomplete="off" /></label>
+        <label class="full">会话存档私钥路径<input name="archive_private_key_path" placeholder="C:\\wecom\\private_key.pem" /></label>
+        <label class="check"><input name="archive_enabled" type="checkbox" />启用会话存档采集</label>
+        <label class="check"><input name="dry_run" type="checkbox" />dry-run（不发送真实消息）</label>
+      </form><div class="actions"><button onclick="saveSettings()">保存配置</button><span id="save-note" class="muted"></span></div></article>
+      <article class="card span-4"><h2>演示操作</h2><p class="muted">用于验证链路，不代表真实企微消息。</p><textarea id="demo-content" placeholder="@系统反馈助手 登录后看不到订单"></textarea><div class="actions"><button class="secondary" onclick="demoIngest()">写入演示反馈</button><button class="secondary" onclick="demoSummary()">生成并发送摘要</button></div><p id="demo-note" class="muted" style="margin-top:10px"></p></article>
+      <article class="card span-8"><h2>最近反馈</h2><div id="feedback-table"></div></article>
+      <article class="card span-12"><h2>发送任务</h2><div id="jobs-table"></div></article>
+    </section>
+  </main>
+  <script>
+    const $ = (s) => document.querySelector(s);
+    const esc = (v) => String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+    async function api(path, options) { const r = await fetch(path, {headers:{'Content-Type':'application/json'}, ...options}); const data = await r.json(); if (!r.ok) throw new Error(data.error || '请求失败'); return data; }
+    function setField(name, value) { const el = document.querySelector(`[name="${name}"]`); if (el) el.type === 'checkbox' ? el.checked = !!value : el.value = value ?? ''; }
+    async function refresh() {
+      try {
+        const [settings, health, feedback, jobs] = await Promise.all([api('/api/settings'), api('/api/health'), api('/api/feedback'), api('/api/jobs')]);
+        ['database_path','target_room_id','target_group_name','target_group_remark','target_account_id','target_account_names','context_window_seconds','summary_times','archive_corp_id','archive_private_key_path'].forEach(k => setField(k, settings[k]));
+        setField('archive_enabled', settings.archive_enabled); setField('dry_run', settings.dry_run);
+        $('#status').innerHTML = `<span class="dot ${health.ok ? 'ok':'bad'}"></span>${health.ok ? '配置完整，可运行':'需要补充配置'}`;
+        $('#status-note').style.display = health.missing_config.length ? 'block':'none'; $('#status-note').textContent = health.missing_config.length ? '缺少：' + health.missing_config.join('、') : '';
+        $('#raw-count').textContent = health.counts.raw_messages; $('#feedback-count').textContent = health.counts.feedback_items; $('#job-count').textContent = health.counts.send_jobs;
+        renderFeedback(feedback); renderJobs(jobs);
+      } catch (e) { $('#status').innerHTML = '<span class="dot bad"></span>控制台请求失败'; $('#status-note').style.display='block'; $('#status-note').textContent=e.message; }
+    }
+    function renderFeedback(items) { if (!items.length) return $('#feedback-table').innerHTML='<div class="empty">暂无反馈记录</div>'; $('#feedback-table').innerHTML=`<table><thead><tr><th>标题</th><th>类型</th><th>优先级</th><th>状态</th><th>提交人</th></tr></thead><tbody>${items.map(i=>`<tr><td>${esc(i.title)}<br><small>${esc(i.description)}</small></td><td>${esc(i.feedback_type)}</td><td><span class="tag">${esc(i.priority)}</span></td><td>${esc(i.status)}</td><td>${esc(i.submitter)}</td></tr>`).join('')}</tbody></table>`; }
+    function renderJobs(items) { if (!items.length) return $('#jobs-table').innerHTML='<div class="empty">暂无发送任务</div>'; $('#jobs-table').innerHTML=`<table><thead><tr><th>任务</th><th>计划时间</th><th>状态</th><th>内容</th></tr></thead><tbody>${items.map(i=>`<tr><td>${esc(i.job_id)}</td><td>${esc(i.scheduled_at)}</td><td>${esc(i.status)}</td><td>${esc(i.content).replace(/\n/g,'<br>')}</td></tr>`).join('')}</tbody></table>`; }
+    async function saveSettings() { const f = new FormData($('#settings-form')); const data = Object.fromEntries(f.entries()); data.archive_enabled=f.has('archive_enabled'); data.dry_run=f.has('dry_run'); try { await api('/api/settings',{method:'POST',body:JSON.stringify(data)}); $('#save-note').textContent='已保存'; await refresh(); } catch(e) { $('#save-note').textContent=e.message; } }
+    async function demoIngest() { try { const data=await api('/api/demo-ingest',{method:'POST',body:JSON.stringify({content:$('#demo-content').value})}); $('#demo-note').textContent=data.accepted?'已写入':'已忽略'; await refresh(); } catch(e) { $('#demo-note').textContent=e.message; } }
+    async function demoSummary() { try { const data=await api('/api/demo-summary',{method:'POST',body:'{}'}); $('#demo-note').textContent=`摘要任务 ${data.sent ? '已发送（dry-run）':'已创建'}`; await refresh(); } catch(e) { $('#demo-note').textContent=e.message; } }
+    refresh();
+  </script>
+</body>
+</html>

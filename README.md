@@ -18,7 +18,10 @@ python -m wecom_feedback init-db
 python -m wecom_feedback health
 python -m wecom_feedback demo-ingest --content "@系统反馈助手 登录后看不到订单"
 python -m wecom_feedback demo-summary
+python -m wecom_feedback web
 ```
+
+浏览器打开 `http://127.0.0.1:8765` 即可进入本机配置控制台。控制台可以保存 `.env`、查看健康状态、查看反馈/发送任务，并运行 dry-run 演示。首次接入真实企微前建议保持 dry-run 开启。
 
 `WECOM_DRY_RUN=true` 时不会发送真实消息，也不会调用外部企微服务。正式接入前需要配置目标群 `roomid`、账号 ID/名称，并确认会话存档已对该账号开放。
 

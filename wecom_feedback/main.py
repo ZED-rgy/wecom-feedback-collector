@@ -24,6 +24,9 @@ def build_parser() -> argparse.ArgumentParser:
     demo.add_argument("--content", required=True)
     demo.add_argument("--sender", default="演示客户")
     subparsers.add_parser("demo-summary", help="create and dispatch one dry-run summary")
+    web = subparsers.add_parser("web", help="start the local configuration dashboard")
+    web.add_argument("--host", default="127.0.0.1")
+    web.add_argument("--port", type=int, default=8765)
     return parser
 
 
@@ -66,6 +69,11 @@ def main(argv: list[str] | None = None) -> None:
         job = workflow.schedule_summary()
         sent = workflow.dispatch_due_jobs(DryRunSender())
         print(json.dumps({"job_id": job.job_id, "sent": sent}, ensure_ascii=False, indent=2))
+        return
+    if args.command == "web":
+        from .webapp import run_dashboard
+
+        run_dashboard(args.host, args.port)
 
 
 if __name__ == "__main__":
