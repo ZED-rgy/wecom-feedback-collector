@@ -1,0 +1,91 @@
+import os
+import tempfile
+import unittest
+from datetime import datetime, timezone
+from pathlib import Path
+
+from wecom_feedback.config import Settings
+from wecom_feedback.db import Database
+from wecom_feedback.models import RawMessage
+from wecom_feedback.services.feedback import FeedbackService
+from wecom_feedback.services.ingestion import IngestionService, mentions_target
+from wecom_feedback.services.workflow import WorkflowService
+from wecom_feedback.adapters.bot import DryRunBot
+
+
+class CoreTests(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.db = Database(Path(self.temp_dir.name) / "test.db")
+        self.db.init_schema()
+        self.settings = Settings(
+            database_path=Path(self.temp_dir.name) / "test.db",
+            archive_enabled=False,
+            archive_corp_id="",
+            archive_secret="",
+            archive_private_key_path="",
+            target_room_id="room-1",
+            target_group_name="客户群",
+            target_group_remark="",
+            target_account_id="agent-1",
+            target_account_names=("系统反馈助手",),
+            context_window_seconds=90,
+            summary_times=("12:00",),
+            dry_run=True,
+        )
+
+    def tearDown(self):
+        self.temp_dir.cleanup()
+
+    def test_mentions_target(self):
+        self.assertTrue(mentions_target("请看 @系统反馈助手 这个问题", self.settings.target_account_names))
+        self.assertFalse(mentions_target("普通消息", self.settings.target_account_names))
+
+    def test_ingest_is_idempotent_and_creates_feedback(self):
+        message = RawMessage(
+            message_id="m-1",
+            seq=1,
+            account_id="customer-1",
+            room_id="room-1",
+            group_name="客户群",
+            group_remark="",
+            sender_id="customer-1",
+            sender_name="客户A",
+            message_type="text",
+            raw_content="@系统反馈助手 登录后无法看到订单",
+            content="@系统反馈助手 登录后无法看到订单",
+            mentioned_account=True,
+            created_at=datetime.now(timezone.utc),
+        )
+        ingestion = IngestionService(self.settings, self.db)
+        self.assertTrue(ingestion.ingest(message))
+        self.assertFalse(ingestion.ingest(message))
+        item = FeedbackService(self.settings, self.db).create_from_message(message)
+        self.assertEqual(item.feedback_type, "使用问题")
+        self.assertEqual(self.db.counts()["raw_messages"], 1)
+        self.assertEqual(self.db.counts()["feedback_items"], 1)
+
+    def test_summary_job_can_be_dispatched_in_dry_run(self):
+        message = RawMessage(
+            message_id="m-2",
+            seq=2,
+            account_id="customer-2",
+            room_id="room-1",
+            group_name="客户群",
+            group_remark="",
+            sender_id="customer-2",
+            sender_name="客户B",
+            message_type="text",
+            raw_content="@系统反馈助手 希望增加导出功能",
+            content="@系统反馈助手 希望增加导出功能",
+            mentioned_account=True,
+        )
+        workflow = WorkflowService(self.settings, self.db, DryRunBot())
+        self.assertTrue(workflow.process_message(message))
+        job = workflow.schedule_summary()
+        self.assertEqual(job.room_id, "room-1")
+        self.assertEqual(self.db.counts()["send_jobs"], 1)
+
+
+if __name__ == "__main__":
+    unittest.main()
