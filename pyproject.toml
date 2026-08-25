@@ -9,5 +9,12 @@ description = "Windows-first WeCom customer group feedback collector"
 requires-python = ">=3.11"
 dependencies = []
 
+[project.optional-dependencies]
+windows = [
+  "pyautogui>=0.9.54",
+  "Pillow>=10.0",
+  "pyperclip>=1.8.2",
+]
+
 [tool.setuptools]
 packages = ["wecom_feedback", "wecom_feedback.adapters", "wecom_feedback.services"]
