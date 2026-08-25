@@ -18,7 +18,12 @@ class IngestionService:
         self.database = database
 
     def should_capture(self, message: RawMessage) -> bool:
-        if message.room_id != self.settings.target_room_id:
+        target_room = self.settings.target_room_id
+        same_room = message.room_id == target_room if target_room else (
+            bool(self.settings.target_group_name)
+            and message.group_name == self.settings.target_group_name
+        )
+        if not same_room:
             return False
         if message.account_id == self.settings.target_account_id:
             return False

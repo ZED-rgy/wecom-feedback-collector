@@ -73,9 +73,13 @@ class Settings:
 
     def missing_required(self) -> list[str]:
         missing: list[str] = []
-        if not self.target_room_id:
+        # UI/dry-run testing can identify the group and account by display name.
+        # Official conversation archive mode additionally requires backend IDs.
+        if not self.target_room_id and not self.target_group_name:
+            missing.append("WECOM_TARGET_ROOM_ID 或 WECOM_TARGET_GROUP_NAME")
+        if self.archive_enabled and not self.target_room_id:
             missing.append("WECOM_TARGET_ROOM_ID")
-        if not self.target_account_id:
+        if self.archive_enabled and not self.target_account_id:
             missing.append("WECOM_TARGET_ACCOUNT_ID")
         if not self.target_account_names:
             missing.append("WECOM_TARGET_ACCOUNT_NAMES")

@@ -67,7 +67,7 @@ class CollectorRuntime:
         self.stop_event.set()
 
     def _schedule_due_summaries(self) -> int:
-        if not self.settings.target_room_id:
+        if not (self.settings.target_room_id or self.settings.target_group_name):
             return 0
         now_local = datetime.now().astimezone()
         scheduled = 0

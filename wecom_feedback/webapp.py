@@ -44,7 +44,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
             return self._json(check_health(settings, database).as_dict())
         if path == "/api/feedback":
-            return self._json([item.__dict__ for item in database.list_feedback(settings.target_room_id)])
+            room_key = settings.target_room_id or settings.target_group_name
+            return self._json([item.__dict__ for item in database.list_feedback(room_key)])
         if path == "/api/jobs":
             return self._json(database.list_jobs())
         if path in {"/", "/index.html"}:
@@ -76,7 +77,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     message_id=f"web-demo-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S%f')}",
                     seq=0,
                     account_id="web-demo-customer",
-                    room_id=settings.target_room_id or "demo-room",
+                    room_id=settings.target_room_id or settings.target_group_name or "demo-room",
                     group_name=settings.target_group_name or "演示客户群",
                     group_remark=settings.target_group_remark,
                     sender_id="web-demo-customer",

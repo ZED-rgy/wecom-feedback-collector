@@ -28,8 +28,8 @@ def check_health(settings: Settings, database: Database) -> HealthSnapshot:
         database_path=str(settings.database_path),
         archive_enabled=settings.archive_enabled,
         dry_run=settings.dry_run,
-        target_room_configured=bool(settings.target_room_id),
-        target_account_configured=bool(settings.target_account_id and settings.target_account_names),
+        target_room_configured=bool(settings.target_room_id or settings.target_group_name),
+        target_account_configured=bool(settings.target_account_id or settings.target_account_names),
         missing_config=missing,
         counts=database.counts(),
     )

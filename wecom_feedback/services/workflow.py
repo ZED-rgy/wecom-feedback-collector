@@ -32,12 +32,13 @@ class WorkflowService:
 
     def schedule_summary(self, scheduled_at: datetime | None = None) -> SendJob:
         scheduled_at = scheduled_at or datetime.now(timezone.utc)
-        items = self.database.list_feedback(self.settings.target_room_id)
+        room_key = self.settings.target_room_id or self.settings.target_group_name
+        items = self.database.list_feedback(room_key)
         content = self.bot.render_summary(items)
-        digest = sha1(f"{self.settings.target_room_id}:{scheduled_at.isoformat()}".encode()).hexdigest()[:12]
+        digest = sha1(f"{room_key}:{scheduled_at.isoformat()}".encode()).hexdigest()[:12]
         job = SendJob(
             job_id=f"SUMMARY-{scheduled_at.strftime('%Y%m%d%H%M')}-{digest}",
-            room_id=self.settings.target_room_id,
+            room_id=room_key,
             content=content,
             scheduled_at=scheduled_at,
         )

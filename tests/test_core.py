@@ -67,6 +67,18 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(self.db.counts()["raw_messages"], 1)
         self.assertEqual(self.db.counts()["feedback_items"], 1)
 
+    def test_name_only_test_mode_can_capture_target_group(self):
+        settings = self.settings.__class__(
+            **{**self.settings.__dict__, "target_room_id": "", "target_account_id": "", "target_group_name": "测试群"}
+        )
+        message = RawMessage(
+            message_id="name-only-1", seq=1, account_id="customer-4", room_id="unknown",
+            group_name="测试群", group_remark="", sender_id="customer-4", sender_name="客户D",
+            message_type="text", raw_content="@系统反馈助手 有个问题", content="@系统反馈助手 有个问题",
+            mentioned_account=True,
+        )
+        self.assertTrue(IngestionService(settings, self.db).ingest(message))
+
     def test_summary_job_can_be_dispatched_in_dry_run(self):
         message = RawMessage(
             message_id="m-2",
