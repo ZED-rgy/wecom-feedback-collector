@@ -27,6 +27,9 @@ def build_parser() -> argparse.ArgumentParser:
     web = subparsers.add_parser("web", help="start the local configuration dashboard")
     web.add_argument("--host", default="127.0.0.1")
     web.add_argument("--port", type=int, default=8765)
+    run = subparsers.add_parser("run", help="run the long-lived collector loop")
+    run.add_argument("--once", action="store_true", help="execute one cycle and exit")
+    run.add_argument("--poll-interval", type=int, default=None)
     return parser
 
 
@@ -74,6 +77,16 @@ def main(argv: list[str] | None = None) -> None:
         from .webapp import run_dashboard
 
         run_dashboard(args.host, args.port)
+        return
+    if args.command == "run":
+        from .adapters.archive import NotConfiguredArchive
+        from .runtime import CollectorRuntime
+
+        runtime = CollectorRuntime(settings, database, NotConfiguredArchive(), DryRunBot(), DryRunSender())
+        if args.once:
+            print(json.dumps(runtime.run_once(), ensure_ascii=False, indent=2))
+        else:
+            runtime.run_forever(args.poll_interval)
 
 
 if __name__ == "__main__":

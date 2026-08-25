@@ -48,6 +48,7 @@ class Settings:
     target_account_names: tuple[str, ...]
     context_window_seconds: int
     summary_times: tuple[str, ...]
+    poll_interval_seconds: int
     dry_run: bool
 
     @classmethod
@@ -66,6 +67,7 @@ class Settings:
             target_account_names=_csv_env("WECOM_TARGET_ACCOUNT_NAMES"),
             context_window_seconds=int(os.getenv("WECOM_CONTEXT_WINDOW_SECONDS", "90")),
             summary_times=_csv_env("WECOM_SUMMARY_TIMES") or ("12:00", "18:00"),
+            poll_interval_seconds=int(os.getenv("WECOM_POLL_INTERVAL_SECONDS", "10")),
             dry_run=_bool_env("WECOM_DRY_RUN", True),
         )
 
@@ -101,6 +103,7 @@ class Settings:
             "target_account_names": ", ".join(self.target_account_names),
             "context_window_seconds": self.context_window_seconds,
             "summary_times": ", ".join(self.summary_times),
+            "poll_interval_seconds": self.poll_interval_seconds,
             "dry_run": self.dry_run,
         }
 
@@ -120,6 +123,7 @@ def save_env(values: dict[str, object], path: Path = ENV_FILE) -> None:
         "WECOM_TARGET_ACCOUNT_NAMES": values.get("target_account_names", ""),
         "WECOM_CONTEXT_WINDOW_SECONDS": values.get("context_window_seconds", 90),
         "WECOM_SUMMARY_TIMES": values.get("summary_times", "12:00,18:00"),
+        "WECOM_POLL_INTERVAL_SECONDS": values.get("poll_interval_seconds", 10),
         "WECOM_DRY_RUN": str(values.get("dry_run", True)).lower(),
     }
     secret = str(values.get("archive_secret", "")).strip()

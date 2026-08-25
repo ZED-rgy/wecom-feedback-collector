@@ -11,6 +11,7 @@ from wecom_feedback.services.feedback import FeedbackService
 from wecom_feedback.services.ingestion import IngestionService, mentions_target
 from wecom_feedback.services.workflow import WorkflowService
 from wecom_feedback.adapters.bot import DryRunBot
+from wecom_feedback.runtime import CollectorRuntime
 
 
 class CoreTests(unittest.TestCase):
@@ -31,6 +32,7 @@ class CoreTests(unittest.TestCase):
             target_account_names=("系统反馈助手",),
             context_window_seconds=90,
             summary_times=("12:00",),
+            poll_interval_seconds=10,
             dry_run=True,
         )
 
@@ -85,6 +87,36 @@ class CoreTests(unittest.TestCase):
         job = workflow.schedule_summary()
         self.assertEqual(job.room_id, "room-1")
         self.assertEqual(self.db.counts()["send_jobs"], 1)
+
+    def test_runtime_pulls_archive_and_advances_cursor(self):
+        class FakeArchive:
+            def pull_messages(self, cursor, limit=100):
+                self.cursor = cursor
+                return [RawMessage(
+                    message_id="archive-1", seq=5, account_id="customer-3", room_id="room-1",
+                    group_name="客户群", group_remark="", sender_id="customer-3", sender_name="客户C",
+                    message_type="text", raw_content="@系统反馈助手 有一个报错",
+                    content="@系统反馈助手 有一个报错", mentioned_account=True,
+                )]
+
+        class FakeSender:
+            def is_ready(self):
+                return True
+
+            def send_text(self, room_id, content):
+                self.last = (room_id, content)
+
+        archive = FakeArchive()
+        sender = FakeSender()
+        settings = self.settings.__class__(
+            **{**self.settings.__dict__, "archive_enabled": True, "archive_corp_id": "c",
+               "archive_secret": "s", "archive_private_key_path": "k", "summary_times": ("23:59",)}
+        )
+        runtime = CollectorRuntime(settings, self.db, archive, DryRunBot(), sender)
+        result = runtime.run_once()
+        self.assertEqual(result["pulled"], 1)
+        self.assertEqual(result["processed"], 1)
+        self.assertEqual(self.db.get_state("archive_cursor"), "5")
 
 
 if __name__ == "__main__":

@@ -35,6 +35,7 @@
         <label>企微账号名称（逗号分隔）<input name="target_account_names" placeholder="系统反馈助手,小王" /></label>
         <label>上下文窗口（秒）<input name="context_window_seconds" type="number" min="10" /></label>
         <label>摘要时间（逗号分隔）<input name="summary_times" placeholder="12:00,18:00" /></label>
+        <label>轮询间隔（秒）<input name="poll_interval_seconds" type="number" min="2" /></label>
         <label>会话存档 Corp ID<input name="archive_corp_id" /></label>
         <label>会话存档 Secret（留空表示不修改）<input name="archive_secret" type="password" autocomplete="off" /></label>
         <label class="full">会话存档私钥路径<input name="archive_private_key_path" placeholder="C:\\wecom\\private_key.pem" /></label>
@@ -54,7 +55,7 @@
     async function refresh() {
       try {
         const [settings, health, feedback, jobs] = await Promise.all([api('/api/settings'), api('/api/health'), api('/api/feedback'), api('/api/jobs')]);
-        ['database_path','target_room_id','target_group_name','target_group_remark','target_account_id','target_account_names','context_window_seconds','summary_times','archive_corp_id','archive_private_key_path'].forEach(k => setField(k, settings[k]));
+        ['database_path','target_room_id','target_group_name','target_group_remark','target_account_id','target_account_names','context_window_seconds','summary_times','poll_interval_seconds','archive_corp_id','archive_private_key_path'].forEach(k => setField(k, settings[k]));
         setField('archive_enabled', settings.archive_enabled); setField('dry_run', settings.dry_run);
         $('#status').innerHTML = `<span class="dot ${health.ok ? 'ok':'bad'}"></span>${health.ok ? '配置完整，可运行':'需要补充配置'}`;
         $('#status-note').style.display = health.missing_config.length ? 'block':'none'; $('#status-note').textContent = health.missing_config.length ? '缺少：' + health.missing_config.join('、') : '';
