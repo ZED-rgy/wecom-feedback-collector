@@ -10,6 +10,7 @@ from ..db import Database
 from ..models import RawMessage, SendJob
 from .feedback import FeedbackService
 from .ingestion import IngestionService
+from .reporting import build_report, mark_report_sent
 
 
 class WorkflowService:
@@ -52,13 +53,14 @@ class WorkflowService:
     ) -> SendJob:
         scheduled_at = scheduled_at or datetime.now(timezone.utc)
         room_key = self.settings.target_room_id or self.settings.target_group_name
-        items = (
-            self.database.feedback_by_ids(feedback_ids)
-            if feedback_ids is not None
-            else self.database.list_feedback(room_key)
-        )
-        items = [item for item in items if item.status not in {"已忽略", "已完成"}]
-        rendered_content = content.strip() if content and content.strip() else self.bot.render_summary(items)
+        if content and content.strip():
+            rendered_content = content.strip()
+        elif feedback_ids is not None:
+            items = self.database.feedback_by_ids(feedback_ids)
+            items = [item for item in items if item.status not in {"已忽略", "已完成"}]
+            rendered_content = self.bot.render_summary(items)
+        else:
+            rendered_content = str(build_report(self.settings, self.database, self.bot)["content"])
         digest = sha1(f"{room_key}:{scheduled_at.isoformat()}".encode()).hexdigest()[:12]
         job = SendJob(
             job_id=f"SUMMARY-{scheduled_at.strftime('%Y%m%d%H%M')}-{digest}",
@@ -81,6 +83,7 @@ class WorkflowService:
             self.database.finish_job(job.job_id, success=False, error=str(exc))
             raise
         self.database.finish_job(job.job_id, success=True)
+        mark_report_sent(self.database, job.room_id)
         return True
 
     def dispatch_due_jobs(self, sender: WeComAccountSender, limit: int = 10) -> int:
@@ -94,5 +97,6 @@ class WorkflowService:
                 self.database.finish_job(job.job_id, success=False, error=str(exc))
             else:
                 self.database.finish_job(job.job_id, success=True)
+                mark_report_sent(self.database, job.room_id)
                 sent += 1
         return sent

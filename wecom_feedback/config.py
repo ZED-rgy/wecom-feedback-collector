@@ -1,11 +1,27 @@
 from __future__ import annotations
 
 import os
+import base64
 from dataclasses import dataclass
 from pathlib import Path
 
 
 ENV_FILE = Path(".env")
+DEFAULT_SUMMARY_TEMPLATE = """【{group_name}反馈进展｜{report_time}】
+
+今日新增：{today_new} 项
+待确认：{pending_confirmation} 项
+处理中：{in_progress} 项
+今日已完成：{completed_today} 项
+当前任务总数：{total} 项
+
+近 {interval_hours} 小时新增：
+{recent_items}
+
+需要重点跟进：
+{focus_items}
+
+详细进度请查看智能表格。"""
 
 
 def load_dotenv(path: Path = ENV_FILE) -> None:
@@ -34,6 +50,16 @@ def _csv_env(name: str) -> tuple[str, ...]:
     return tuple(item.strip() for item in value.split(",") if item.strip())
 
 
+def _template_env() -> str:
+    encoded = os.getenv("WECOM_SUMMARY_TEMPLATE_B64", "").strip()
+    if not encoded:
+        return DEFAULT_SUMMARY_TEMPLATE
+    try:
+        return base64.b64decode(encoded).decode("utf-8")
+    except (ValueError, UnicodeDecodeError):
+        return DEFAULT_SUMMARY_TEMPLATE
+
+
 @dataclass(frozen=True)
 class Settings:
     database_path: Path
@@ -57,6 +83,12 @@ class Settings:
     table_bot_secret: str = ""
     local_db_enabled: bool = False
     auto_send_enabled: bool = False
+    summary_schedule_mode: str = "interval"
+    summary_interval_hours: int = 2
+    summary_active_start: str = "08:00"
+    summary_active_end: str = "22:00"
+    summary_template: str = DEFAULT_SUMMARY_TEMPLATE
+    summary_detail_limit: int = 5
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -83,6 +115,12 @@ class Settings:
             table_bot_secret=os.getenv("WECOM_TABLE_BOT_SECRET", "").strip(),
             local_db_enabled=_bool_env("WECOM_LOCAL_DB_ENABLED", False),
             auto_send_enabled=_bool_env("WECOM_AUTO_SEND_ENABLED", False),
+            summary_schedule_mode=os.getenv("WECOM_SUMMARY_SCHEDULE_MODE", "interval").strip() or "interval",
+            summary_interval_hours=max(1, int(os.getenv("WECOM_SUMMARY_INTERVAL_HOURS", "2"))),
+            summary_active_start=os.getenv("WECOM_SUMMARY_ACTIVE_START", "08:00").strip() or "08:00",
+            summary_active_end=os.getenv("WECOM_SUMMARY_ACTIVE_END", "22:00").strip() or "22:00",
+            summary_template=_template_env(),
+            summary_detail_limit=max(1, int(os.getenv("WECOM_SUMMARY_DETAIL_LIMIT", "5"))),
         )
 
     def missing_required(self) -> list[str]:
@@ -139,6 +177,12 @@ class Settings:
             "table_bot_secret_configured": bool(self.table_bot_secret),
             "local_db_enabled": self.local_db_enabled,
             "auto_send_enabled": self.auto_send_enabled,
+            "summary_schedule_mode": self.summary_schedule_mode,
+            "summary_interval_hours": self.summary_interval_hours,
+            "summary_active_start": self.summary_active_start,
+            "summary_active_end": self.summary_active_end,
+            "summary_template": self.summary_template,
+            "summary_detail_limit": self.summary_detail_limit,
         }
 
 
@@ -165,6 +209,14 @@ def save_env(values: dict[str, object], path: Path = ENV_FILE) -> None:
         "WECOM_TABLE_BOT_ID": values.get("table_bot_id", ""),
         "WECOM_LOCAL_DB_ENABLED": str(values.get("local_db_enabled", False)).lower(),
         "WECOM_AUTO_SEND_ENABLED": str(values.get("auto_send_enabled", False)).lower(),
+        "WECOM_SUMMARY_SCHEDULE_MODE": values.get("summary_schedule_mode", "interval"),
+        "WECOM_SUMMARY_INTERVAL_HOURS": values.get("summary_interval_hours", 2),
+        "WECOM_SUMMARY_ACTIVE_START": values.get("summary_active_start", "08:00"),
+        "WECOM_SUMMARY_ACTIVE_END": values.get("summary_active_end", "22:00"),
+        "WECOM_SUMMARY_TEMPLATE_B64": base64.b64encode(
+            str(values.get("summary_template", DEFAULT_SUMMARY_TEMPLATE)).encode("utf-8")
+        ).decode("ascii"),
+        "WECOM_SUMMARY_DETAIL_LIMIT": values.get("summary_detail_limit", 5),
     }
     secret = str(values.get("archive_secret", "")).strip()
     if secret:

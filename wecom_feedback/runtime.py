@@ -12,6 +12,7 @@ from .config import Settings
 from .db import Database
 from .models import RawMessage
 from .services.workflow import WorkflowService
+from .services.schedule import due_schedule_at
 
 logger = logging.getLogger("wecom_feedback.runtime")
 
@@ -48,8 +49,8 @@ class CollectorRuntime:
             if cursor != int(self.database.get_state("archive_cursor", "0")):
                 self.database.set_state("archive_cursor", str(cursor))
 
-        scheduled = self._schedule_due_summaries()
-        sent = self.workflow.dispatch_due_jobs(self.sender)
+        scheduled = self._schedule_due_summaries() if self.settings.auto_send_enabled else 0
+        sent = self.workflow.dispatch_due_jobs(self.sender) if self.settings.auto_send_enabled else 0
         return {"pulled": pulled, "processed": processed, "scheduled": scheduled, "sent": sent}
 
     def run_forever(self, poll_interval: int | None = None) -> None:
@@ -70,22 +71,16 @@ class CollectorRuntime:
         if not (self.settings.target_room_id or self.settings.target_group_name):
             return 0
         now_local = datetime.now().astimezone()
-        scheduled = 0
-        for time_text in self.settings.summary_times:
-            try:
-                hour, minute = (int(part) for part in time_text.split(":", 1))
-            except ValueError:
-                logger.warning("invalid summary time: %s", time_text)
-                continue
-            if (now_local.hour, now_local.minute) < (hour, minute):
-                continue
-            key = f"summary:{now_local.date().isoformat()}:{hour:02d}:{minute:02d}"
-            if self.database.get_state(key):
-                continue
-            self.workflow.schedule_summary(now_local.astimezone(timezone.utc))
-            self.database.set_state(key, "scheduled")
-            scheduled += 1
-        return scheduled
+        slot = due_schedule_at(self.settings, now_local)
+        if slot is None:
+            return 0
+        room_key = self.settings.target_room_id or self.settings.target_group_name
+        key = f"summary:{room_key}:{slot.strftime('%Y-%m-%d:%H:%M')}"
+        if self.database.get_state(key):
+            return 0
+        self.workflow.schedule_summary(slot.astimezone(timezone.utc))
+        self.database.set_state(key, "scheduled")
+        return 1
 
 
 def build_default_runtime(settings: Settings, database: Database) -> CollectorRuntime:

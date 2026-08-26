@@ -4,7 +4,8 @@ import json
 import logging
 import threading
 from collections import Counter
-from datetime import datetime, timedelta, timezone
+from dataclasses import replace
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
@@ -15,6 +16,7 @@ from .config import Settings, save_env
 from .db import Database
 from .models import RawMessage
 from .services.workflow import WorkflowService
+from .services.schedule import next_schedule_at
 
 
 WEB_ROOT = Path(__file__).resolve().parent.parent / "web"
@@ -22,21 +24,8 @@ logger = logging.getLogger("wecom_feedback.webapp")
 
 
 def _next_summary_at(settings: Settings) -> str:
-    now = datetime.now().astimezone()
-    candidates: list[datetime] = []
-    for offset in (0, 1):
-        day = now.date() + timedelta(days=offset)
-        for value in settings.summary_times:
-            try:
-                hour, minute = (int(part) for part in value.split(":", 1))
-                candidate = datetime.combine(day, datetime.min.time(), tzinfo=now.tzinfo).replace(
-                    hour=hour, minute=minute
-                )
-            except (ValueError, TypeError):
-                continue
-            if candidate > now:
-                candidates.append(candidate)
-    return min(candidates).isoformat() if candidates else ""
+    value = next_schedule_at(settings)
+    return value.isoformat() if value else ""
 
 
 def _activity(database: Database, room_key: str, limit: int = 40) -> list[dict[str, object]]:
@@ -319,6 +308,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             room_key = settings.target_room_id or settings.target_group_name
             return self._json(_activity(database, room_key))
         if path == "/api/summary/preview":
+            from .services.reporting import build_report
             from .services.summary import select_summary_items
 
             room_key = settings.target_room_id or settings.target_group_name
@@ -327,14 +317,20 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 if item.status not in {"已忽略", "已完成"}
             ]
             selected = select_summary_items(candidates)
-            content = build_bot(settings).render_summary(selected)
+            report = build_report(settings, database, build_bot(settings))
             return self._json(
                 {
-                    "content": content,
+                    "content": report["content"],
                     "items": [_feedback_payload(database, item) for item in selected],
                     "next_summary_at": _next_summary_at(settings),
                     "target_group": settings.target_group_name,
                     "auto_send_enabled": settings.auto_send_enabled,
+                    "stats": {
+                        key: report[key]
+                        for key in ("today_new", "pending_confirmation", "in_progress", "completed_today", "total")
+                    },
+                    "source": report["source"],
+                    "warning": report["warning"],
                 }
             )
         if path == "/api/local-reader/status":
@@ -370,6 +366,46 @@ class DashboardHandler(BaseHTTPRequestHandler):
             database = Database(settings.database_path)
             database.init_schema()
             workflow = WorkflowService(settings, database, DryRunBot())
+            if path in {"/api/group/validate", "/api/group/switch"}:
+                from .adapters.windows_local_db import WindowsWeComLocalDbReceiver
+
+                group_name = str(payload.get("group_name", "")).strip()
+                group_remark = str(payload.get("group_remark", "")).strip()
+                if not group_name:
+                    return self._json({"error": "请输入群聊名称"}, 400)
+                candidate = replace(
+                    settings,
+                    target_room_id="",
+                    target_group_name=group_name,
+                    target_group_remark=group_remark,
+                )
+                diagnostic = WindowsWeComLocalDbReceiver(candidate, lambda _message: False).diagnose().as_dict()
+                if path.endswith("/validate"):
+                    return self._json(diagnostic)
+                if not diagnostic.get("ready"):
+                    return self._json({"error": diagnostic.get("error") or "未在本机企微中找到该群", "diagnostic": diagnostic}, 400)
+                old_group = settings.target_group_name
+                values = settings.public_dict()
+                values.update(
+                    {
+                        "target_room_id": "",
+                        "target_group_name": group_name,
+                        "target_group_remark": group_remark,
+                        "archive_secret": "",
+                        "table_bot_secret": "",
+                    }
+                )
+                save_env(values)
+                if candidate.local_db_enabled:
+                    LOCAL_RECEIVER.restart()
+                return self._json(
+                    {
+                        "switched": True,
+                        "old_group": old_group,
+                        "new_group": group_name,
+                        "diagnostic": diagnostic,
+                    }
+                )
             if path == "/api/local-reader/diagnose":
                 from .adapters.windows_local_db import WindowsWeComLocalDbReceiver
 
