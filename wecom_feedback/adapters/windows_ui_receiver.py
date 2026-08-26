@@ -9,6 +9,7 @@ Windows UI Automation. It does not inject into WeCom or bypass verification.
 import ctypes
 import hashlib
 import logging
+import re
 import time
 from dataclasses import dataclass
 from typing import Any, Callable
@@ -138,7 +139,7 @@ class WindowsWeComUiReceiver:
         target_names = tuple(name.lower() for name in self.settings.target_account_names)
         accepted = 0
         for text in texts:
-            normalized = text.replace("\u2005", " ").strip()
+            normalized = re.sub(r"\s+", " ", text.replace("\u2005", " ")).strip()
             if not normalized or not any(f"@{name}" in normalized.lower() for name in target_names):
                 continue
             digest = hashlib.sha1(
@@ -161,6 +162,7 @@ class WindowsWeComUiReceiver:
                     raw_content=normalized,
                     content=normalized,
                     mentioned_account=True,
+                    payload={"source": "windows_ui_ocr"},
                 )
             )
             accepted += 1
