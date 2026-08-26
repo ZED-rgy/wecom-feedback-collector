@@ -24,9 +24,23 @@ class WorkflowService:
 
     def process_message(self, message: RawMessage) -> bool:
         if not self.ingestion.ingest(message):
-            return False
-        item = self.feedback.create_from_message(message)
-        if item is not None:
+            # UI polling has no stable message ID. If the message was already
+            # ingested, use it as an opportunity to retry a failed table sync.
+            item = self.database.feedback_for_message(message.message_id)
+            if item is None:
+                return False
+        else:
+            item = self.feedback.create_from_message(message)
+            if item is None:
+                item = self.database.feedback_for_message(message.message_id)
+        if item is None:
+            return True
+        sync_key = f"smart_table_synced:{item.feedback_id}"
+        should_sync = self.settings.table_integration_enabled and not self.settings.dry_run
+        if should_sync and not self.database.get_state(sync_key):
+            self.bot.upsert_feedback(item)
+            self.database.set_state(sync_key, "1")
+        elif not self.settings.table_integration_enabled:
             self.bot.upsert_feedback(item)
         return True
 

@@ -127,6 +127,31 @@ class Database:
             ).fetchone()
             return row is not None
 
+    def feedback_for_message(self, message_id: str) -> FeedbackItem | None:
+        needle = f'%"{message_id}"%'
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM feedback_items WHERE source_message_ids_json LIKE ? LIMIT 1", (needle,)
+            ).fetchone()
+        if row is None:
+            return None
+        return FeedbackItem(
+            feedback_id=row["feedback_id"],
+            room_id=row["room_id"],
+            account_id=row["account_id"],
+            submitter=row["submitter"],
+            feedback_type=row["feedback_type"],
+            title=row["title"],
+            description=row["description"],
+            priority=row["priority"],
+            status=row["status"],
+            source_message_ids=tuple(json.loads(row["source_message_ids_json"])),
+            confidence=float(row["confidence"]),
+            need_more_info=bool(row["need_more_info"]),
+            created_at=datetime.fromisoformat(row["created_at"]),
+            updated_at=datetime.fromisoformat(row["updated_at"]),
+        )
+
     def save_feedback(self, item: FeedbackItem) -> None:
         with self.connect() as conn:
             conn.execute(
