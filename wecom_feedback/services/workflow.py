@@ -77,6 +77,13 @@ class WorkflowService:
         job = self.database.claim_job(job_id)
         if job is None:
             return False
+        return self.dispatch_claimed_job(job, sender)
+
+    def dispatch_claimed_job(self, job: SendJob, sender: WeComAccountSender) -> bool:
+        """Dispatch a job already reserved by a background send worker."""
+        if not sender.is_ready():
+            self.database.finish_job(job.job_id, success=False, error="企微主窗口未打开，任务已保留")
+            return False
         try:
             sender.send_text(job.room_id, job.content)
         except DeliveryUnconfirmed as exc:

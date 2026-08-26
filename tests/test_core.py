@@ -175,6 +175,28 @@ class CoreTests(unittest.TestCase):
         self.assertTrue(self.db.retry_job(job.job_id))
         self.assertEqual(self.db.get_job(job.job_id).status, "pending")
 
+    def test_reserved_manual_job_returns_to_pending_when_wecom_is_not_ready(self):
+        class NotReadySender:
+            def is_ready(self):
+                return False
+
+            def send_text(self, room_id, content):
+                raise AssertionError("send_text must not be called")
+
+        job = SendJob(
+            job_id="manual-not-ready", room_id="room-1", content="摘要",
+            scheduled_at=datetime.now(timezone.utc),
+        )
+        self.db.create_send_job(job)
+        claimed = self.db.claim_job(job.job_id)
+        self.assertIsNotNone(claimed)
+        workflow = WorkflowService(self.settings, self.db, DryRunBot())
+
+        self.assertFalse(workflow.dispatch_claimed_job(claimed, NotReadySender()))
+        stored = self.db.get_job(job.job_id)
+        self.assertEqual(stored.status, "pending")
+        self.assertIn("企微主窗口未打开", stored.last_error)
+
     def test_feedback_can_be_edited_and_sync_status_reported(self):
         message = RawMessage(
             message_id="edit-1", seq=9, account_id="customer", room_id="room-1",

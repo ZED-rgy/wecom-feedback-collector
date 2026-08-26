@@ -8,13 +8,14 @@ from dataclasses import replace
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from queue import Empty, Queue
 from urllib.parse import urlparse
 
 from .adapters.bot import DryRunBot, build_bot
 from .adapters.sender import DryRunSender, build_sender
 from .config import Settings, save_env
 from .db import Database
-from .models import RawMessage
+from .models import RawMessage, SendJob
 from .services.workflow import WorkflowService
 from .services.schedule import next_schedule_at
 
@@ -264,6 +265,79 @@ class SummarySchedulerController:
 SUMMARY_SCHEDULER = SummarySchedulerController()
 
 
+class ManualSendController:
+    """Run operator-confirmed sends after the WebView click has fully settled."""
+
+    def __init__(self, settle_seconds: float = 2.0) -> None:
+        self.settle_seconds = settle_seconds
+        self._queue: Queue[tuple[Settings, SendJob]] = Queue()
+        self._stop = threading.Event()
+        self._lock = threading.Lock()
+        self._thread: threading.Thread | None = None
+        self._active_job_id = ""
+        self._last_job_id = ""
+        self._last_error = ""
+
+    def start(self) -> None:
+        with self._lock:
+            if self._thread and self._thread.is_alive():
+                return
+            self._stop.clear()
+            self._thread = threading.Thread(target=self._run, name="wecom-manual-send", daemon=True)
+            self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+
+    def enqueue(self, settings: Settings, job: SendJob) -> None:
+        self.start()
+        self._queue.put((settings, job))
+
+    def status(self) -> dict[str, object]:
+        with self._lock:
+            return {
+                "running": bool(self._thread and self._thread.is_alive()),
+                "active_job_id": self._active_job_id,
+                "last_job_id": self._last_job_id,
+                "last_error": self._last_error,
+                "queued": self._queue.qsize(),
+            }
+
+    def _run(self) -> None:
+        while not self._stop.is_set():
+            try:
+                settings, job = self._queue.get(timeout=0.5)
+            except Empty:
+                continue
+            with self._lock:
+                self._active_job_id = job.job_id
+                self._last_error = ""
+            try:
+                # The response that closes the confirmation modal must finish
+                # before Win32 focus changes begin. Otherwise the WebView's
+                # click/focus lifecycle can immediately steal focus back.
+                if self._stop.wait(self.settle_seconds):
+                    break
+                database = Database(settings.database_path)
+                database.init_schema()
+                workflow = WorkflowService(settings, database, build_bot(settings))
+                from .adapters.sender import build_manual_sender
+
+                workflow.dispatch_claimed_job(job, build_manual_sender(settings))
+            except Exception as exc:
+                logger.exception("manual send worker failed for %s", job.job_id)
+                with self._lock:
+                    self._last_error = str(exc)
+            finally:
+                with self._lock:
+                    self._last_job_id = job.job_id
+                    self._active_job_id = ""
+                self._queue.task_done()
+
+
+MANUAL_SEND_QUEUE = ManualSendController()
+
+
 class DashboardHandler(BaseHTTPRequestHandler):
     server_version = "WeComFeedbackDashboard/0.1"
 
@@ -337,6 +411,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
             return self._json(LOCAL_RECEIVER.status())
         if path == "/api/runtime/status":
             return self._json(SUMMARY_SCHEDULER.status())
+        if path == "/api/manual-send/status":
+            return self._json(MANUAL_SEND_QUEUE.status())
         if path in {"/", "/index.html"}:
             body = (WEB_ROOT / "index.html").read_bytes()
             self.send_response(200)
@@ -463,9 +539,14 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 )
                 sent = False
                 if path.endswith("/send-now"):
-                    from .adapters.sender import build_manual_sender
-
-                    sent = real_workflow.dispatch_job(job.job_id, build_manual_sender(settings))
+                    claimed = database.claim_job(job.job_id)
+                    if claimed is None:
+                        return self._json({"error": "发送任务未能锁定，请刷新后重试"}, 409)
+                    MANUAL_SEND_QUEUE.enqueue(settings, claimed)
+                    return self._json(
+                        {"job_id": job.job_id, "sent": False, "queued": True, "status": "claimed"},
+                        202,
+                    )
                 return self._json({"job_id": job.job_id, "sent": sent, "status": database.get_job(job.job_id).status})
             if path == "/api/jobs/cancel":
                 return self._json({"cancelled": database.cancel_job(str(payload.get("job_id", "")))})
@@ -510,11 +591,13 @@ def start_background_controllers() -> None:
     if Settings.from_env().local_db_enabled:
         LOCAL_RECEIVER.start()
     SUMMARY_SCHEDULER.start()
+    MANUAL_SEND_QUEUE.start()
 
 
 def stop_background_controllers() -> None:
     LOCAL_RECEIVER.stop()
     SUMMARY_SCHEDULER.stop()
+    MANUAL_SEND_QUEUE.stop()
 
 
 def run_dashboard(host: str = "127.0.0.1", port: int = 8765) -> None:
