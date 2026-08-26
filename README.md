@@ -36,7 +36,7 @@ UI 接收不需要 Corp ID、Secret 或私钥；只需要保持当前登录的�
 
 ```text
 wecom_feedback/
-  adapters/       外部系统接口（会话存档、机器人、桌面发送）
+  adapters/       外部系统接口（Windows UI 接收、桌面发送）
   services/       采集、反馈整理、摘要编排
   config.py       环境变量配置
   db.py           SQLite 状态和幂等存储
