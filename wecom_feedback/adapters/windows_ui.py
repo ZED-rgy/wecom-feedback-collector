@@ -170,6 +170,22 @@ def _send_select_all_copy(hwnd: int, settle_seconds: float) -> None:
     _send_input_key_events(hwnd, events, settle_seconds)
 
 
+def _paste_window_text(hwnd: int, text: str, settle_seconds: float) -> None:
+    """Paste the prepared message into the already verified WeCom editor."""
+    clipboard = _clipboard()
+    clipboard.copy(text)
+    _send_input_key_events(
+        hwnd,
+        [
+            (0x11, False),  # Ctrl down
+            (0x56, False),  # V down
+            (0x56, True),
+            (0x11, True),
+        ],
+        settle_seconds,
+    )
+
+
 def _visible_window_by_title(title: str) -> int | None:
     """Find a visible top-level window without using a process hook."""
     user32 = ctypes.windll.user32
@@ -409,11 +425,29 @@ def _ocr_window_region(
 
 def _verify_search_query(hwnd: int, query: str, min_confidence: float) -> None:
     """Require the intended query to be visible before selecting a result."""
-    texts = _ocr_window_region(hwnd, 0.08, 0.005, 0.14, 0.075, min_confidence)
     expected = re.sub(r"\s+", "", query).lower()
-    observed = "".join(re.sub(r"\s+", "", text).lower() for text in texts)
-    if not expected or expected not in observed:
-        raise WindowsUiError(f"群聊搜索校验失败：期望“{query}”，搜索框识别为“{' / '.join(texts) or '空'}”")
+    observed_texts: list[str] = []
+    # Search text is rendered in a small custom control and can be missed by
+    # OCR for one frame immediately after WM_CHAR input. Retry with a wider,
+    # slightly more tolerant crop before declaring the destination invalid.
+    for attempt in range(3):
+        texts = _ocr_window_region(
+            hwnd,
+            0.075,
+            0.002,
+            0.19,
+            0.12,
+            max(0.45, min_confidence - 0.12),
+        )
+        observed_texts = texts
+        observed = "".join(re.sub(r"\s+", "", text).lower() for text in texts)
+        if expected and expected in observed:
+            return
+        if attempt < 2:
+            time.sleep(0.18)
+    raise WindowsUiError(
+        f"群聊搜索校验失败：期望“{query}”，搜索框识别为“{' / '.join(observed_texts) or '空'}”"
+    )
 
 
 def _verify_group_header(hwnd: int, group_name: str, min_confidence: float) -> None:
@@ -462,7 +496,7 @@ class WindowsWeComUiSender:
             if existing_draft is not None and _normalized_text(existing_draft):
                 raise WindowsUiError("目标群输入框中已有未发送草稿，已保留草稿并终止自动发送")
             _send_window_key(hwnd, _VK_BACK)
-            _send_window_text(hwnd, content)
+            _paste_window_text(hwnd, content, self.config.settle_seconds)
             time.sleep(0.2)
 
             # A stale clipboard value could make a failed Ctrl+C look valid.

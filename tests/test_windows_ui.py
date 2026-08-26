@@ -7,6 +7,7 @@ from wecom_feedback.adapters.windows_ui import (
     WindowsWeComUiSender,
     _belongs_to_same_process,
     _normalized_text,
+    _paste_window_text,
 )
 
 
@@ -23,6 +24,21 @@ class WindowsUiSenderTests(unittest.TestCase):
 
     def test_clipboard_comparison_normalizes_line_endings(self):
         self.assertEqual(_normalized_text("第一行\r\n第二行  "), "第一行\n第二行")
+
+    @patch("wecom_feedback.adapters.windows_ui._send_input_key_events")
+    @patch("wecom_feedback.adapters.windows_ui._clipboard")
+    def test_message_paste_targets_verified_wecom_window(self, clipboard_factory, send_events):
+        clipboard = MagicMock()
+        clipboard_factory.return_value = clipboard
+
+        _paste_window_text(101, "摘要内容", 0.4)
+
+        clipboard.copy.assert_called_once_with("摘要内容")
+        send_events.assert_called_once_with(
+            101,
+            [(0x11, False), (0x56, False), (0x56, True), (0x11, True)],
+            0.4,
+        )
 
     @patch("wecom_feedback.adapters.windows_ui._window_process_id", side_effect=[9001, 9001])
     def test_auxiliary_wecom_window_is_accepted_as_same_process(self, _process_id):
