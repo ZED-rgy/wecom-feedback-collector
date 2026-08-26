@@ -2,17 +2,16 @@
 
 请按下面清单准备信息。Secret、私钥、Webhook Token 不要直接发在聊天里，建议只放在运行 Windows 机器的 `.env` 或指定私钥文件中。
 
-## 1. 会话存档采集（必需）
+## 1. Windows 企微账号接收（当前方案）
 
-- [ ] 已在企业微信管理后台开通“会话内容存档”；
-- [ ] 目标企微员工账号已加入会话存档范围；
-- [ ] 企业 Corp ID（可先只提供是否已准备，不要粘贴 Secret）；
-- [ ] 会话存档 Secret 已准备，放入本机 `.env` 的 `WECOM_ARCHIVE_SECRET`；
-- [ ] 会话存档私钥 PEM 文件已放到 Windows 机器，并记录绝对路径；
-- [ ] 官方会话存档 SDK 的 Windows x64 文件（DLL/头文件或 SDK 压缩包）；
-- [ ] SDK 版本、Windows 版本、Python 版本、32/64 位信息；
-- [ ] 目标员工的企业微信 UserID；
-- [ ] 目标客户群的 `roomid`（如果暂时没有，先提供群名称和群备注）。
+- [ ] 这台电脑已登录目标企微员工账号；
+- [ ] 企微桌面端已打开目标群“测试群”，且窗口保持可见；
+- [ ] 目标群名称和备注已填写，名称尽量唯一；
+- [ ] 目标员工显示名称已填写（当前为“冉光意”）；
+- [ ] 已安装 Windows UI 依赖：`python -m pip install -e ".[windows]"`；
+- [ ] 先运行 `python -m wecom_feedback run-ui --once` 验证能否读取可见文本；
+- [ ] 再运行 `python -m wecom_feedback run-ui` 做持续监听测试；
+- [ ] 接受 UI 监听可能受窗口遮挡、锁屏、客户端升级和远程验证影响。
 
 ## 2. Windows 企微发送账号（必需）
 
