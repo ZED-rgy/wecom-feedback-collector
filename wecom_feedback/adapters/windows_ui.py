@@ -357,6 +357,19 @@ def _ocr_window_region(
         import numpy as np
         import pyautogui
         from rapidocr_onnxruntime import RapidOCR
+        # RapidOCR 1.x keeps legacy module names in config.yaml
+        # (``ch_ppocr_v3_det`` etc.). In a PyInstaller bundle those names are
+        # not automatically registered as top-level modules, which makes the
+        # dynamic import resolve to an incomplete namespace. Bind the actual
+        # packaged modules explicitly before constructing the engine.
+        import sys
+        import rapidocr_onnxruntime.ch_ppocr_v2_cls as cls_module
+        import rapidocr_onnxruntime.ch_ppocr_v3_det as det_module
+        import rapidocr_onnxruntime.ch_ppocr_v3_rec as rec_module
+
+        sys.modules["ch_ppocr_v2_cls"] = cls_module
+        sys.modules["ch_ppocr_v3_det"] = det_module
+        sys.modules["ch_ppocr_v3_rec"] = rec_module
     except ImportError as exc:  # pragma: no cover - Windows-only dependencies
         raise WindowsUiError("安全发送需要 rapidocr-onnxruntime 以核对目标群") from exc
     foreground = _foreground_window()
