@@ -84,9 +84,54 @@ def _window_rect(hwnd: int) -> tuple[int, int, int, int]:
     return int(rect.left), int(rect.top), int(rect.right), int(rect.bottom)
 
 
+def _foreground_window() -> int:
+    return int(ctypes.windll.user32.GetForegroundWindow())
+
+
 def _normalized_text(value: str) -> str:
     lines = [re.sub(r"[ \t]+", " ", line).rstrip() for line in value.replace("\r\n", "\n").split("\n")]
     return "\n".join(lines).strip()
+
+
+def _activate_window(hwnd: int, settle_seconds: float) -> None:
+    """Bring WeCom to the foreground and fail closed if Windows refuses."""
+    user32 = ctypes.windll.user32
+    user32.ShowWindow(hwnd, 3)  # SW_MAXIMIZE
+    for _ in range(3):
+        user32.BringWindowToTop(hwnd)
+        user32.SetForegroundWindow(hwnd)
+        time.sleep(min(max(settle_seconds / 3, 0.08), 0.3))
+        if _foreground_window() == hwnd:
+            return
+    raise WindowsUiError("无法将企微窗口切换到前台，已禁止发送")
+
+
+def _focus_target_group(hwnd: int, config: WindowsUiConfig) -> None:
+    """Use WeCom's keyboard search to focus the configured group's editor."""
+    pyautogui = _pyautogui()
+    pyautogui.press("esc", presses=3, interval=0.08)
+    pyautogui.hotkey("ctrl", "f")
+    _paste_text(config.group_remark or config.group_name)
+    pyautogui.press("enter")
+    time.sleep(config.settle_seconds)
+    _verify_group_header(hwnd, config.group_name, config.ocr_min_confidence)
+
+
+def _read_focused_editor_text() -> str | None:
+    """Copy the focused editor without trusting a stale clipboard value."""
+    pyautogui = _pyautogui()
+    clipboard = _clipboard()
+    sentinel = f"WECOM-COPY-CHECK-{secrets.token_hex(12)}"
+    clipboard.copy(sentinel)
+    pyautogui.hotkey("ctrl", "a")
+    pyautogui.hotkey("ctrl", "c")
+    time.sleep(0.2)
+    copied = str(clipboard.paste())
+    if copied == sentinel:
+        pyautogui.press("esc")
+        return None
+    pyautogui.press("right")  # Collapse the selection without changing text.
+    return copied
 
 
 _OCR_ENGINE: Any = None
@@ -101,7 +146,7 @@ def _verify_group_header(hwnd: int, group_name: str, min_confidence: float) -> N
         from rapidocr_onnxruntime import RapidOCR
     except ImportError as exc:  # pragma: no cover - Windows-only dependencies
         raise WindowsUiError("安全发送需要 rapidocr-onnxruntime 以核对目标群") from exc
-    if ctypes.windll.user32.GetForegroundWindow() != hwnd:
+    if _foreground_window() != hwnd:
         raise WindowsUiError("企微窗口已失去焦点，已终止发送")
     if _OCR_ENGINE is None:
         _OCR_ENGINE = RapidOCR()
@@ -141,23 +186,15 @@ class WindowsWeComUiSender:
         if hwnd is None:
             raise WindowsUiError("WeCom window is not visible; unlock and open WeCom first")
         pyautogui = _pyautogui()
-        user32 = ctypes.windll.user32
         # Use a deterministic layout. This removes the old dependency on a
         # particular window position, size, DPI scale, or remembered placement.
-        user32.ShowWindow(hwnd, 3)  # SW_MAXIMIZE
-        user32.SetForegroundWindow(hwnd)
-        time.sleep(self.config.settle_seconds)
+        _activate_window(hwnd, self.config.settle_seconds)
         clipboard = _clipboard()
         original_clipboard = clipboard.paste()
         try:
             # Close transient menus/modals, then use WeCom's own keyboard search
             # instead of clicking a coordinate in the sidebar.
-            pyautogui.press("esc", presses=3, interval=0.08)
-            pyautogui.hotkey("ctrl", "f")
-            _paste_text(self.config.group_remark or self.config.group_name)
-            pyautogui.press("enter")
-            time.sleep(self.config.settle_seconds)
-            _verify_group_header(hwnd, self.config.group_name, self.config.ocr_min_confidence)
+            _focus_target_group(hwnd, self.config)
 
             # Entering an exact search result moves focus to WeCom's message
             # editor. Do not click anywhere: DirectUI toolbar positions change
@@ -178,16 +215,9 @@ class WindowsWeComUiSender:
             # A stale clipboard value could make a failed Ctrl+C look valid.
             # Replace it with a random sentinel first, then require an exact
             # copy-back from the focused editor before Enter is ever allowed.
-            sentinel = f"WECOM-COPY-CHECK-{secrets.token_hex(12)}"
-            clipboard.copy(sentinel)
-            pyautogui.hotkey("ctrl", "a")
-            pyautogui.hotkey("ctrl", "c")
-            time.sleep(0.2)
-            copied = str(clipboard.paste())
-            if copied == sentinel or _normalized_text(copied) != _normalized_text(content):
-                pyautogui.press("esc")
+            copied = _read_focused_editor_text()
+            if copied is None or _normalized_text(copied) != _normalized_text(content):
                 raise WindowsUiError("输入框内容回读失败，可能点到了工具栏或弹窗，已禁止发送")
-            pyautogui.press("right")  # Collapse the selection without changing text.
             self._prepared = (room_id, content)
             self._prepared_hwnd = hwnd
         finally:
@@ -206,10 +236,24 @@ class WindowsWeComUiSender:
         hwnd = self._prepared_hwnd
         if hwnd is None or _visible_window_by_title(self.config.window_title) != hwnd:
             raise WindowsUiError("企微窗口已变化，已禁止发送")
-        user32 = ctypes.windll.user32
-        if user32.GetForegroundWindow() != hwnd:
-            raise WindowsUiError("企微窗口已失去焦点，已禁止发送")
-        _verify_group_header(hwnd, self.config.group_name, self.config.ocr_min_confidence)
-        _pyautogui().press("enter")
-        self._prepared = None
-        self._prepared_hwnd = None
+        clipboard = _clipboard()
+        original_clipboard = clipboard.paste()
+        try:
+            # The desktop control panel can regain focus while the HTTP request
+            # is still running. Reacquire WeCom and revalidate both destination
+            # and payload immediately before Enter instead of trusting focus
+            # retained from prepare_text().
+            _activate_window(hwnd, self.config.settle_seconds)
+            _focus_target_group(hwnd, self.config)
+            copied = _read_focused_editor_text()
+            if copied is None or _normalized_text(copied) != _normalized_text(content):
+                raise WindowsUiError("发送前输入框内容校验失败，已禁止发送")
+            _activate_window(hwnd, 0.15)
+            if _foreground_window() != hwnd:
+                raise WindowsUiError("企微窗口再次失去焦点，已禁止发送")
+            _verify_group_header(hwnd, self.config.group_name, self.config.ocr_min_confidence)
+            _pyautogui().press("enter")
+            self._prepared = None
+            self._prepared_hwnd = None
+        finally:
+            clipboard.copy(original_clipboard)
