@@ -60,7 +60,16 @@ class CliSmartTableBot:
         except subprocess.TimeoutExpired as exc:
             raise SmartTableError("企微智能表格操作超时") from exc
         if result.returncode != 0:
-            detail = (result.stderr or result.stdout).strip().splitlines()
+            output = (result.stderr or result.stdout).strip()
+            try:
+                error_payload = json.loads(output)
+            except json.JSONDecodeError:
+                error_payload = None
+            if isinstance(error_payload, dict):
+                error = error_payload.get("error")
+                if isinstance(error, dict) and error.get("message"):
+                    raise SmartTableError(str(error["message"]))
+            detail = output.splitlines()
             raise SmartTableError(detail[-1] if detail else f"wecom-cli exit code {result.returncode}")
         try:
             response = json.loads(result.stdout)
@@ -78,7 +87,9 @@ class CliSmartTableBot:
             "问题描述/补充": _text_value(item.description),
             "反馈人": _text_value(item.submitter),
             "问题类型": _text_value(item.feedback_type),
-            "是否已解决": "false",
+            # CLI validates typed fields from the JSON value itself.  Do not
+            # encode checkbox values as strings (text "false" is rejected).
+            "是否已解决": False,
             "备注": _text_value(f"优先级：{item.priority}；状态：{item.status}"),
             "来源群": _text_value(self.settings.target_group_name or item.room_id),
             "来源消息ID": _text_value(",".join(item.source_message_ids)),
