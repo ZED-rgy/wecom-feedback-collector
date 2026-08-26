@@ -46,9 +46,128 @@ def _clipboard() -> Any:
     return pyperclip
 
 
-def _paste_text(text: str) -> None:
-    _clipboard().copy(text)
-    _pyautogui().hotkey("ctrl", "v")
+_WM_KEYDOWN = 0x0100
+_WM_KEYUP = 0x0101
+_WM_CHAR = 0x0102
+_VK_BACK = 0x08
+_VK_RETURN = 0x0D
+_VK_SHIFT = 0x10
+_VK_RIGHT = 0x27
+
+
+def _send_window_key(hwnd: int, virtual_key: int) -> None:
+    """Send a key only to WeCom instead of the global foreground app."""
+    user32 = ctypes.windll.user32
+    user32.SendMessageW(hwnd, _WM_KEYDOWN, virtual_key, 0)
+    user32.SendMessageW(hwnd, _WM_KEYUP, virtual_key, 0xC0000001)
+
+
+def _send_window_chord(hwnd: int, modifier: int, virtual_key: int) -> None:
+    user32 = ctypes.windll.user32
+    user32.SendMessageW(hwnd, _WM_KEYDOWN, modifier, 0)
+    user32.SendMessageW(hwnd, _WM_KEYDOWN, virtual_key, 0)
+    user32.SendMessageW(hwnd, _WM_KEYUP, virtual_key, 0xC0000001)
+    user32.SendMessageW(hwnd, _WM_KEYUP, modifier, 0xC0000001)
+
+
+def _send_input_key_events(
+    hwnd: int,
+    events: list[tuple[int, bool]],
+    settle_seconds: float,
+) -> None:
+    """Atomically inject non-text keys after verifying WeCom foreground."""
+    from ctypes import wintypes
+
+    class KeyboardInput(ctypes.Structure):
+        _fields_ = [
+            ("wVk", wintypes.WORD),
+            ("wScan", wintypes.WORD),
+            ("dwFlags", wintypes.DWORD),
+            ("time", wintypes.DWORD),
+            ("dwExtraInfo", wintypes.WPARAM),
+        ]
+
+    class MouseInput(ctypes.Structure):
+        _fields_ = [
+            ("dx", wintypes.LONG),
+            ("dy", wintypes.LONG),
+            ("mouseData", wintypes.DWORD),
+            ("dwFlags", wintypes.DWORD),
+            ("time", wintypes.DWORD),
+            ("dwExtraInfo", wintypes.WPARAM),
+        ]
+
+    class HardwareInput(ctypes.Structure):
+        _fields_ = [("uMsg", wintypes.DWORD), ("wParamL", wintypes.WORD), ("wParamH", wintypes.WORD)]
+
+    class InputUnion(ctypes.Union):
+        _fields_ = [("ki", KeyboardInput), ("mi", MouseInput), ("hi", HardwareInput)]
+
+    class Input(ctypes.Structure):
+        _anonymous_ = ("data",)
+        _fields_ = [("type", wintypes.DWORD), ("data", InputUnion)]
+
+    def key_event(virtual_key: int, key_up: bool) -> Input:
+        return Input(
+            type=1,
+            ki=KeyboardInput(virtual_key, 0, 0x0002 if key_up else 0, 0, 0),
+        )
+
+    _activate_window(hwnd, settle_seconds)
+    if _foreground_window() != hwnd:
+        raise WindowsUiError("企微窗口已失去焦点，无法安全执行按键")
+    input_events = [key_event(virtual_key, key_up) for virtual_key, key_up in events]
+    input_array = (Input * len(input_events))(*input_events)
+    sent = int(ctypes.windll.user32.SendInput(len(input_array), input_array, ctypes.sizeof(Input)))
+    if sent != len(input_events):
+        raise WindowsUiError("企微安全按键未完整执行，已终止发送")
+
+
+def _send_window_text(hwnd: int, text: str, settle_seconds: float = 0.15) -> None:
+    """Write Unicode text to WeCom's focused DirectUI control.
+
+    Newlines are inserted with Shift+Enter so they cannot accidentally trigger
+    the chat editor's send action.
+    """
+    user32 = ctypes.windll.user32
+    normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+    for chunk_index, chunk in enumerate(normalized.split("\n")):
+        if chunk_index:
+            # Shift+Enter must be a real input event because WeCom checks the
+            # physical modifier state. It contains no user text and is sent as
+            # one atomic batch immediately after a foreground assertion.
+            _send_input_key_events(
+                hwnd,
+                [(_VK_SHIFT, False), (_VK_RETURN, False), (_VK_RETURN, True), (_VK_SHIFT, True)],
+                settle_seconds,
+            )
+            # SendInput is queued while the following WM_CHAR calls are
+            # synchronous; allow the line break to be consumed first.
+            time.sleep(0.08)
+        encoded = chunk.encode("utf-16-le", errors="surrogatepass")
+        for offset in range(0, len(encoded), 2):
+            code_unit = int.from_bytes(encoded[offset : offset + 2], "little")
+            user32.SendMessageW(hwnd, _WM_CHAR, code_unit, 1)
+
+
+def _send_select_all_copy(hwnd: int, settle_seconds: float) -> None:
+    """Atomically select and copy from the verified foreground WeCom window.
+
+    WeCom's editor is a custom DirectUI control and ignores WM_COPY. SendInput
+    is therefore retained only for this non-destructive readback operation. No
+    user text or Enter key is ever sent through the global input queue.
+    """
+    events: list[tuple[int, bool]] = []
+    for virtual_key in (0x41, 0x43):  # Ctrl+A, Ctrl+C
+        events.extend(
+            [
+                (0x11, False),
+                (virtual_key, False),
+                (virtual_key, True),
+                (0x11, True),
+            ]
+        )
+    _send_input_key_events(hwnd, events, settle_seconds)
 
 
 def _visible_window_by_title(title: str) -> int | None:
@@ -109,10 +228,30 @@ def _normalized_text(value: str) -> str:
 def _activate_window(hwnd: int, settle_seconds: float) -> None:
     """Bring WeCom to the foreground and fail closed if Windows refuses."""
     user32 = ctypes.windll.user32
-    user32.ShowWindow(hwnd, 3)  # SW_MAXIMIZE
+    kernel32 = ctypes.windll.kernel32
     for _ in range(3):
-        user32.BringWindowToTop(hwnd)
-        user32.SetForegroundWindow(hwnd)
+        current_thread = int(kernel32.GetCurrentThreadId())
+        foreground = _foreground_window()
+        foreground_thread = int(user32.GetWindowThreadProcessId(foreground, None))
+        target_thread = int(user32.GetWindowThreadProcessId(hwnd, None))
+        attached_threads: list[int] = []
+        try:
+            # The sender usually runs from a background worker two seconds
+            # after the WebView click. Attach to the active input queues so
+            # Windows does not reject SetForegroundWindow merely because that
+            # worker was not the process that received the user's last click.
+            for thread_id in {foreground_thread, target_thread}:
+                if thread_id and thread_id != current_thread:
+                    if user32.AttachThreadInput(current_thread, thread_id, True):
+                        attached_threads.append(thread_id)
+            user32.ShowWindow(hwnd, 3)  # SW_MAXIMIZE
+            user32.BringWindowToTop(hwnd)
+            user32.SetForegroundWindow(hwnd)
+            user32.SetActiveWindow(hwnd)
+            user32.SetFocus(hwnd)
+        finally:
+            for thread_id in attached_threads:
+                user32.AttachThreadInput(current_thread, thread_id, False)
         time.sleep(min(max(settle_seconds / 3, 0.08), 0.3))
         if _foreground_window() == hwnd:
             # A WebView click can briefly hand focus back to the control panel
@@ -142,15 +281,35 @@ def _restore_control_window(hwnd: int | None) -> None:
     logger.info("control window restored after WeCom send: hwnd=%s", hwnd)
 
 
+def _click_wecom_area(hwnd: int, x_ratio: float, y_ratio: float, settle_seconds: float) -> None:
+    """Focus a WeCom DirectUI area with a guarded physical mouse click."""
+    _activate_window(hwnd, settle_seconds)
+    left, top, right, bottom = _window_rect(hwnd)
+    width, height = right - left, bottom - top
+    _pyautogui().click(left + int(width * x_ratio), top + int(height * y_ratio))
+    time.sleep(0.16)
+    if _foreground_window() != hwnd:
+        raise WindowsUiError("企微窗口在点击后失去焦点，已终止操作")
+
+
 def _focus_target_group(hwnd: int, config: WindowsUiConfig) -> None:
-    """Use WeCom's keyboard search to focus the configured group's editor."""
-    pyautogui = _pyautogui()
+    """Search and select the configured group without globally typing its name."""
+    query = config.group_remark or config.group_name
     for attempt in range(2):
-        _activate_window(hwnd, config.settle_seconds)
-        pyautogui.press("esc", presses=3, interval=0.08)
-        pyautogui.hotkey("ctrl", "f")
-        _paste_text(config.group_remark or config.group_name)
-        pyautogui.press("enter")
+        # WeCom's search field is a custom DirectUI control. A guarded click is
+        # needed only to assign its internal focus; all following text and keys
+        # are posted directly to the known WeCom HWND.
+        _click_wecom_area(hwnd, 0.135, 0.037, config.settle_seconds)
+        for _ in range(80):
+            _send_window_key(hwnd, _VK_BACK)
+        _send_window_text(hwnd, query)
+        time.sleep(0.25)
+        try:
+            _verify_search_query(hwnd, query, config.ocr_min_confidence)
+        except WindowsUiError:
+            _send_window_key(hwnd, 0x1B)  # Escape; never Enter an unverified field.
+            raise
+        _send_window_key(hwnd, _VK_RETURN)
         time.sleep(config.settle_seconds)
         try:
             _verify_group_header(hwnd, config.group_name, config.ocr_min_confidence)
@@ -162,28 +321,37 @@ def _focus_target_group(hwnd: int, config: WindowsUiConfig) -> None:
     raise WindowsUiError("企微群聊定位失败，已禁止发送")
 
 
-def _read_focused_editor_text() -> str | None:
+def _focus_editor(hwnd: int, config: WindowsUiConfig) -> None:
+    _verify_group_header(hwnd, config.group_name, config.ocr_min_confidence)
+    _click_wecom_area(hwnd, 0.58, 0.93, config.settle_seconds)
+
+
+def _read_focused_editor_text(hwnd: int, settle_seconds: float) -> str | None:
     """Copy the focused editor without trusting a stale clipboard value."""
-    pyautogui = _pyautogui()
     clipboard = _clipboard()
     sentinel = f"WECOM-COPY-CHECK-{secrets.token_hex(12)}"
     clipboard.copy(sentinel)
-    pyautogui.hotkey("ctrl", "a")
-    pyautogui.hotkey("ctrl", "c")
+    _send_select_all_copy(hwnd, settle_seconds)
     time.sleep(0.2)
     copied = str(clipboard.paste())
     if copied == sentinel:
-        pyautogui.press("esc")
         return None
-    pyautogui.press("right")  # Collapse the selection without changing text.
+    _send_window_key(hwnd, _VK_RIGHT)  # Collapse selection without changing text.
     return copied
 
 
 _OCR_ENGINE: Any = None
 
 
-def _verify_group_header(hwnd: int, group_name: str, min_confidence: float) -> None:
-    """OCR only the chat header and require the configured group name."""
+def _ocr_window_region(
+    hwnd: int,
+    left_ratio: float,
+    top_ratio: float,
+    width_ratio: float,
+    height_ratio: float,
+    min_confidence: float,
+    max_text_top_px: int | None = None,
+) -> list[str]:
     global _OCR_ENGINE
     try:
         import numpy as np
@@ -206,16 +374,43 @@ def _verify_group_header(hwnd: int, group_name: str, min_confidence: float) -> N
         _OCR_ENGINE = RapidOCR()
     left, top, right, bottom = _window_rect(hwnd)
     width, height = right - left, bottom - top
-    header_left = left + int(width * 0.26)
-    header_width = max(260, int(width * 0.46))
-    header_height = min(90, max(65, int(height * 0.09)))
-    screenshot = np.asarray(pyautogui.screenshot(region=(header_left, top, header_width, header_height)))
+    region_left = left + int(width * left_ratio)
+    region_top = top + int(height * top_ratio)
+    region_width = max(120, int(width * width_ratio))
+    region_height = max(45, int(height * height_ratio))
+    screenshot = np.asarray(
+        pyautogui.screenshot(region=(region_left, region_top, region_width, region_height))
+    )
     result, _ = _OCR_ENGINE(screenshot)
-    texts = [
+    return [
         str(row[1]).strip()
         for row in (result or [])
-        if len(row) >= 3 and float(row[2]) >= min_confidence
+        if len(row) >= 3
+        and float(row[2]) >= min_confidence
+        and (
+            max_text_top_px is None
+            or min(float(point[1]) for point in row[0]) <= max_text_top_px
+        )
     ]
+
+
+def _verify_search_query(hwnd: int, query: str, min_confidence: float) -> None:
+    """Require the intended query to be visible before selecting a result."""
+    texts = _ocr_window_region(hwnd, 0.08, 0.005, 0.14, 0.075, min_confidence)
+    expected = re.sub(r"\s+", "", query).lower()
+    observed = "".join(re.sub(r"\s+", "", text).lower() for text in texts)
+    if not expected or expected not in observed:
+        raise WindowsUiError(f"群聊搜索校验失败：期望“{query}”，搜索框识别为“{' / '.join(texts) or '空'}”")
+
+
+def _verify_group_header(hwnd: int, group_name: str, min_confidence: float) -> None:
+    """OCR only the chat header and require the configured group name."""
+    # The conversation begins around 21% of the maximized WeCom window. Start
+    # slightly earlier so short group titles such as “测试群” keep enough OCR
+    # margin, while still excluding the conversation list at the left.
+    # RapidOCR needs some vertical context to detect the small title reliably,
+    # but only text located in the first 70 px is accepted as header evidence.
+    texts = _ocr_window_region(hwnd, 0.18, 0.002, 0.55, 0.18, min_confidence, max_text_top_px=70)
     expected = re.sub(r"\s+", "", group_name).lower()
     observed = "".join(re.sub(r"\s+", "", text).lower() for text in texts)
     if not expected or expected not in observed:
@@ -223,7 +418,7 @@ def _verify_group_header(hwnd: int, group_name: str, min_confidence: float) -> N
 
 
 class WindowsWeComUiSender:
-    """Keyboard-first sender with target, editor and payload verification."""
+    """WeCom-targeted sender with target, editor and payload verification."""
 
     def __init__(self, config: WindowsUiConfig):
         self.config = config
@@ -240,7 +435,6 @@ class WindowsWeComUiSender:
         hwnd = _visible_window_by_title(self.config.window_title)
         if hwnd is None:
             raise WindowsUiError("WeCom window is not visible; unlock and open WeCom first")
-        pyautogui = _pyautogui()
         # Use a deterministic layout. This removes the old dependency on a
         # particular window position, size, DPI scale, or remembered placement.
         clipboard = _clipboard()
@@ -248,30 +442,20 @@ class WindowsWeComUiSender:
         try:
             self._control_hwnd = _minimize_control_window(self.config.control_window_title, hwnd)
             _activate_window(hwnd, self.config.settle_seconds)
-            # Close transient menus/modals, then use WeCom's own keyboard search
-            # instead of clicking a coordinate in the sidebar.
             _focus_target_group(hwnd, self.config)
+            _focus_editor(hwnd, self.config)
 
-            # Entering an exact search result moves focus to WeCom's message
-            # editor. Do not click anywhere: DirectUI toolbar positions change
-            # with window size and previously caused the payment action to open.
-            draft_sentinel = f"WECOM-DRAFT-CHECK-{secrets.token_hex(12)}"
-            clipboard.copy(draft_sentinel)
-            pyautogui.hotkey("ctrl", "a")
-            pyautogui.hotkey("ctrl", "c")
-            time.sleep(0.2)
-            existing_draft = str(clipboard.paste())
-            if existing_draft != draft_sentinel and _normalized_text(existing_draft):
-                pyautogui.press("right")
+            existing_draft = _read_focused_editor_text(hwnd, self.config.settle_seconds)
+            if existing_draft is not None and _normalized_text(existing_draft):
                 raise WindowsUiError("目标群输入框中已有未发送草稿，已保留草稿并终止自动发送")
-            pyautogui.press("backspace")
-            _paste_text(content)
+            _send_window_key(hwnd, _VK_BACK)
+            _send_window_text(hwnd, content)
             time.sleep(0.2)
 
             # A stale clipboard value could make a failed Ctrl+C look valid.
             # Replace it with a random sentinel first, then require an exact
             # copy-back from the focused editor before Enter is ever allowed.
-            copied = _read_focused_editor_text()
+            copied = _read_focused_editor_text(hwnd, self.config.settle_seconds)
             if copied is None or _normalized_text(copied) != _normalized_text(content):
                 raise WindowsUiError("输入框内容回读失败，可能点到了工具栏或弹窗，已禁止发送")
             self._prepared = (room_id, content)
@@ -305,14 +489,17 @@ class WindowsWeComUiSender:
             # retained from prepare_text().
             _activate_window(hwnd, self.config.settle_seconds)
             _focus_target_group(hwnd, self.config)
-            copied = _read_focused_editor_text()
+            _focus_editor(hwnd, self.config)
+            copied = _read_focused_editor_text(hwnd, self.config.settle_seconds)
             if copied is None or _normalized_text(copied) != _normalized_text(content):
                 raise WindowsUiError("发送前输入框内容校验失败，已禁止发送")
             _activate_window(hwnd, 0.15)
             if _foreground_window() != hwnd:
                 raise WindowsUiError("企微窗口再次失去焦点，已禁止发送")
             _verify_group_header(hwnd, self.config.group_name, self.config.ocr_min_confidence)
-            _pyautogui().press("enter")
+            # Enter is posted to the verified WeCom HWND, never to whichever
+            # unrelated application happens to be in the foreground.
+            _send_window_key(hwnd, _VK_RETURN)
             self._prepared = None
             self._prepared_hwnd = None
         finally:
