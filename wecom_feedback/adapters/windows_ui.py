@@ -22,6 +22,7 @@ class ConfirmationRequired(WindowsUiError):
 @dataclass(frozen=True)
 class WindowsUiConfig:
     window_title: str = "企业微信"
+    control_window_title: str = "企微反馈收集控制台"
     group_name: str = ""
     group_remark: str = ""
     settle_seconds: float = 0.8
@@ -102,19 +103,51 @@ def _activate_window(hwnd: int, settle_seconds: float) -> None:
         user32.SetForegroundWindow(hwnd)
         time.sleep(min(max(settle_seconds / 3, 0.08), 0.3))
         if _foreground_window() == hwnd:
-            return
+            # A WebView click can briefly hand focus back to the control panel
+            # after SetForegroundWindow succeeds. Require a stable foreground
+            # window instead of accepting that transient state.
+            time.sleep(0.18)
+            if _foreground_window() == hwnd:
+                return
     raise WindowsUiError("无法将企微窗口切换到前台，已禁止发送")
+
+
+def _minimize_control_window(title: str, target_hwnd: int) -> int | None:
+    """Remove the desktop console from focus competition while sending."""
+    hwnd = _visible_window_by_title(title)
+    if hwnd is None or hwnd == target_hwnd:
+        return None
+    ctypes.windll.user32.ShowWindow(hwnd, 6)  # SW_MINIMIZE
+    time.sleep(0.25)
+    logger.info("control window minimized during WeCom send: hwnd=%s", hwnd)
+    return hwnd
+
+
+def _restore_control_window(hwnd: int | None) -> None:
+    if hwnd is None:
+        return
+    ctypes.windll.user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+    logger.info("control window restored after WeCom send: hwnd=%s", hwnd)
 
 
 def _focus_target_group(hwnd: int, config: WindowsUiConfig) -> None:
     """Use WeCom's keyboard search to focus the configured group's editor."""
     pyautogui = _pyautogui()
-    pyautogui.press("esc", presses=3, interval=0.08)
-    pyautogui.hotkey("ctrl", "f")
-    _paste_text(config.group_remark or config.group_name)
-    pyautogui.press("enter")
-    time.sleep(config.settle_seconds)
-    _verify_group_header(hwnd, config.group_name, config.ocr_min_confidence)
+    for attempt in range(2):
+        _activate_window(hwnd, config.settle_seconds)
+        pyautogui.press("esc", presses=3, interval=0.08)
+        pyautogui.hotkey("ctrl", "f")
+        _paste_text(config.group_remark or config.group_name)
+        pyautogui.press("enter")
+        time.sleep(config.settle_seconds)
+        try:
+            _verify_group_header(hwnd, config.group_name, config.ocr_min_confidence)
+            return
+        except WindowsUiError as exc:
+            if attempt or "失去焦点" not in str(exc):
+                raise
+            logger.warning("WeCom lost focus during group search; retrying once")
+    raise WindowsUiError("企微群聊定位失败，已禁止发送")
 
 
 def _read_focused_editor_text() -> str | None:
@@ -175,6 +208,7 @@ class WindowsWeComUiSender:
         self.config = config
         self._prepared: tuple[str, str] | None = None
         self._prepared_hwnd: int | None = None
+        self._control_hwnd: int | None = None
 
     def is_ready(self) -> bool:
         return _visible_window_by_title(self.config.window_title) is not None
@@ -188,10 +222,11 @@ class WindowsWeComUiSender:
         pyautogui = _pyautogui()
         # Use a deterministic layout. This removes the old dependency on a
         # particular window position, size, DPI scale, or remembered placement.
-        _activate_window(hwnd, self.config.settle_seconds)
         clipboard = _clipboard()
         original_clipboard = clipboard.paste()
         try:
+            self._control_hwnd = _minimize_control_window(self.config.control_window_title, hwnd)
+            _activate_window(hwnd, self.config.settle_seconds)
             # Close transient menus/modals, then use WeCom's own keyboard search
             # instead of clicking a coordinate in the sidebar.
             _focus_target_group(hwnd, self.config)
@@ -220,6 +255,10 @@ class WindowsWeComUiSender:
                 raise WindowsUiError("输入框内容回读失败，可能点到了工具栏或弹窗，已禁止发送")
             self._prepared = (room_id, content)
             self._prepared_hwnd = hwnd
+        except Exception:
+            _restore_control_window(self._control_hwnd)
+            self._control_hwnd = None
+            raise
         finally:
             clipboard.copy(original_clipboard)
 
@@ -257,3 +296,5 @@ class WindowsWeComUiSender:
             self._prepared_hwnd = None
         finally:
             clipboard.copy(original_clipboard)
+            _restore_control_window(self._control_hwnd)
+            self._control_hwnd = None

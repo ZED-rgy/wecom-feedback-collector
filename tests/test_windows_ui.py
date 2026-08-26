@@ -24,6 +24,7 @@ class WindowsUiSenderTests(unittest.TestCase):
         self.assertEqual(_normalized_text("第一行\r\n第二行  "), "第一行\n第二行")
 
     @patch("wecom_feedback.adapters.windows_ui._verify_group_header")
+    @patch("wecom_feedback.adapters.windows_ui._restore_control_window")
     @patch("wecom_feedback.adapters.windows_ui._foreground_window", return_value=101)
     @patch("wecom_feedback.adapters.windows_ui._read_focused_editor_text", return_value="发送内容")
     @patch("wecom_feedback.adapters.windows_ui._focus_target_group")
@@ -40,6 +41,7 @@ class WindowsUiSenderTests(unittest.TestCase):
         focus_group,
         read_editor,
         _foreground,
+        restore_control,
         verify_header,
     ):
         ui = MagicMock()
@@ -50,6 +52,7 @@ class WindowsUiSenderTests(unittest.TestCase):
         sender = WindowsWeComUiSender(WindowsUiConfig(group_name="测试群"))
         sender._prepared = ("测试群", "发送内容")
         sender._prepared_hwnd = 101
+        sender._control_hwnd = 202
 
         sender.confirm_and_send("测试群", "发送内容", confirmed=True)
 
@@ -59,9 +62,12 @@ class WindowsUiSenderTests(unittest.TestCase):
         verify_header.assert_called_once_with(101, "测试群", sender.config.ocr_min_confidence)
         ui.press.assert_called_once_with("enter")
         clipboard.copy.assert_has_calls([call("原剪贴板")])
+        restore_control.assert_called_once_with(202)
         self.assertIsNone(sender._prepared)
+        self.assertIsNone(sender._control_hwnd)
 
     @patch("wecom_feedback.adapters.windows_ui._read_focused_editor_text", return_value="被替换的内容")
+    @patch("wecom_feedback.adapters.windows_ui._restore_control_window")
     @patch("wecom_feedback.adapters.windows_ui._focus_target_group")
     @patch("wecom_feedback.adapters.windows_ui._activate_window")
     @patch("wecom_feedback.adapters.windows_ui._visible_window_by_title", return_value=101)
@@ -74,6 +80,7 @@ class WindowsUiSenderTests(unittest.TestCase):
         _visible,
         _activate,
         _focus_group,
+        restore_control,
         _read_editor,
     ):
         ui = MagicMock()
@@ -84,12 +91,14 @@ class WindowsUiSenderTests(unittest.TestCase):
         sender = WindowsWeComUiSender(WindowsUiConfig(group_name="测试群"))
         sender._prepared = ("测试群", "发送内容")
         sender._prepared_hwnd = 101
+        sender._control_hwnd = 202
 
         with self.assertRaisesRegex(Exception, "发送前输入框内容校验失败"):
             sender.confirm_and_send("测试群", "发送内容", confirmed=True)
 
         ui.press.assert_not_called()
         clipboard.copy.assert_called_once_with("原剪贴板")
+        restore_control.assert_called_once_with(202)
 
 
 if __name__ == "__main__":
