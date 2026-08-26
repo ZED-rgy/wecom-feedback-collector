@@ -28,6 +28,7 @@ class WindowsUiReceiverConfig:
     max_control_depth: int = 8
     ocr_enabled: bool = True
     ocr_min_confidence: float = 0.55
+    require_foreground: bool = True
 
 
 def _desktop_window(title: str) -> Any:
@@ -77,7 +78,7 @@ def _window_region(window: Any) -> tuple[int, int, int, int]:
     return int(rect.left), int(rect.top), int(rect.right - rect.left), int(rect.bottom - rect.top)
 
 
-def _ocr_texts(window: Any, min_confidence: float) -> list[str]:
+def _ocr_texts(window: Any, min_confidence: float, require_foreground: bool = True) -> list[str]:
     """OCR the visible WeCom window; loaded lazily because the model is large."""
     global _OCR_ENGINE
     try:
@@ -95,6 +96,8 @@ def _ocr_texts(window: Any, min_confidence: float) -> list[str]:
                 "OCR接收需要 rapidocr-onnxruntime，请执行: pip install -e \".[windows]\""
             ) from exc
         _OCR_ENGINE = RapidOCR()
+    if require_foreground and ctypes.windll.user32.GetForegroundWindow() != window.handle:
+        raise WindowsUiError("企微窗口未在前台，已跳过 OCR，避免读取其他窗口内容")
     left, top, width, height = _window_region(window)
     screenshot = np.asarray(pyautogui.screenshot(region=(left, top, width, height)))
     result, _ = _OCR_ENGINE(screenshot)
@@ -131,7 +134,7 @@ class WindowsWeComUiReceiver:
         window = _desktop_window(self.config.window_title)
         texts = _visible_texts(window, self.config.max_control_depth)
         if self.config.ocr_enabled and not texts:
-            texts = _ocr_texts(window, self.config.ocr_min_confidence)
+            texts = _ocr_texts(window, self.config.ocr_min_confidence, self.config.require_foreground)
         target_names = tuple(name.lower() for name in self.settings.target_account_names)
         accepted = 0
         for text in texts:
