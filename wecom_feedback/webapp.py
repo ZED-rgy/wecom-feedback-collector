@@ -7,7 +7,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
 
-from .adapters.bot import DryRunBot
+from .adapters.bot import DryRunBot, build_bot
 from .adapters.sender import DryRunSender
 from .config import Settings, save_env
 from .db import Database
