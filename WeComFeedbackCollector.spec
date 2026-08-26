@@ -1,11 +1,16 @@
 # -*- mode: python ; coding: utf-8 -*-
 
+from PyInstaller.utils.hooks import collect_data_files
+
 
 a = Analysis(
     ["wecom_feedback_desktop.py"],
     pathex=[],
     binaries=[],
-    datas=[("web", "web")],
+    datas=[
+        ("web", "web"),
+        *collect_data_files("rapidocr_onnxruntime"),
+    ],
     hiddenimports=[
         "PIL.Image",
         "PIL.ImageDraw",
