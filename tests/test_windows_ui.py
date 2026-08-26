@@ -49,7 +49,7 @@ class WindowsUiSenderTests(unittest.TestCase):
         self.assertFalse(_belongs_to_same_process(202, 101))
 
     @patch("wecom_feedback.adapters.windows_ui._verify_group_header")
-    @patch("wecom_feedback.adapters.windows_ui._send_window_key")
+    @patch("wecom_feedback.adapters.windows_ui._send_input_key_events")
     @patch("wecom_feedback.adapters.windows_ui._restore_control_window")
     @patch("wecom_feedback.adapters.windows_ui._foreground_window", return_value=101)
     @patch("wecom_feedback.adapters.windows_ui._read_focused_editor_text", return_value="发送内容")
@@ -68,7 +68,7 @@ class WindowsUiSenderTests(unittest.TestCase):
         read_editor,
         _foreground,
         restore_control,
-        send_window_key,
+        send_input_events,
         verify_header,
     ):
         clipboard = MagicMock()
@@ -86,7 +86,7 @@ class WindowsUiSenderTests(unittest.TestCase):
         focus_editor.assert_called_once_with(101, sender.config)
         read_editor.assert_called_once_with(101, sender.config.settle_seconds)
         verify_header.assert_called_once_with(101, "测试群", sender.config.ocr_min_confidence)
-        send_window_key.assert_called_once_with(101, 0x0D)
+        send_input_events.assert_called_once_with(101, [(0x0D, False), (0x0D, True)], 0.15)
         clipboard.copy.assert_has_calls([call("原剪贴板")])
         restore_control.assert_called_once_with(202)
         self.assertIsNone(sender._prepared)
@@ -99,10 +99,10 @@ class WindowsUiSenderTests(unittest.TestCase):
     @patch("wecom_feedback.adapters.windows_ui._activate_window")
     @patch("wecom_feedback.adapters.windows_ui._visible_window_by_title", return_value=101)
     @patch("wecom_feedback.adapters.windows_ui._clipboard")
-    @patch("wecom_feedback.adapters.windows_ui._send_window_key")
+    @patch("wecom_feedback.adapters.windows_ui._send_input_key_events")
     def test_confirm_never_presses_enter_when_editor_content_changed(
         self,
-        send_window_key,
+        send_input_events,
         clipboard_factory,
         _visible,
         _activate,
@@ -122,7 +122,7 @@ class WindowsUiSenderTests(unittest.TestCase):
         with self.assertRaisesRegex(Exception, "发送前输入框内容校验失败"):
             sender.confirm_and_send("测试群", "发送内容", confirmed=True)
 
-        send_window_key.assert_not_called()
+        send_input_events.assert_not_called()
         clipboard.copy.assert_called_once_with("原剪贴板")
         restore_control.assert_called_once_with(202)
 

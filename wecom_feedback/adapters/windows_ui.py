@@ -494,9 +494,12 @@ class WindowsWeComUiSender:
 
             existing_draft = _read_focused_editor_text(hwnd, self.config.settle_seconds)
             if existing_draft is not None and _normalized_text(existing_draft):
-                raise WindowsUiError("目标群输入框中已有未发送草稿，已保留草稿并终止自动发送")
-            _send_window_key(hwnd, _VK_BACK)
-            _paste_window_text(hwnd, content, self.config.settle_seconds)
+                if _normalized_text(existing_draft) != _normalized_text(content):
+                    raise WindowsUiError("目标群输入框中已有其他未发送草稿，已保留草稿并终止自动发送")
+                logger.info("reusing exact existing WeCom draft for room=%s", room_id)
+            else:
+                _send_window_key(hwnd, _VK_BACK)
+                _paste_window_text(hwnd, content, self.config.settle_seconds)
             time.sleep(0.2)
 
             # A stale clipboard value could make a failed Ctrl+C look valid.
@@ -544,9 +547,11 @@ class WindowsWeComUiSender:
             if _foreground_window() != hwnd:
                 raise WindowsUiError("企微窗口再次失去焦点，已禁止发送")
             _verify_group_header(hwnd, self.config.group_name, self.config.ocr_min_confidence)
-            # Enter is posted to the verified WeCom HWND, never to whichever
-            # unrelated application happens to be in the foreground.
-            _send_window_key(hwnd, _VK_RETURN)
+            # The final Enter must be a real keyboard event: WeCom's custom
+            # editor can ignore a plain WM_KEYDOWN even when search accepts it.
+            # The helper reasserts WeCom immediately before injecting this
+            # single non-text key, so it cannot type into another application.
+            _send_input_key_events(hwnd, [(_VK_RETURN, False), (_VK_RETURN, True)], 0.15)
             self._prepared = None
             self._prepared_hwnd = None
         finally:
