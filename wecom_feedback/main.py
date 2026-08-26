@@ -4,7 +4,7 @@ import argparse
 import json
 from datetime import datetime, timezone
 
-from .adapters.bot import DryRunBot
+from .adapters.bot import DryRunBot, build_bot
 from .adapters.sender import DryRunSender
 from .config import Settings
 from .db import Database
@@ -85,7 +85,7 @@ def main(argv: list[str] | None = None) -> None:
         from .adapters.archive import NotConfiguredArchive
         from .runtime import CollectorRuntime
 
-        runtime = CollectorRuntime(settings, database, NotConfiguredArchive(), DryRunBot(), DryRunSender())
+        runtime = CollectorRuntime(settings, database, NotConfiguredArchive(), build_bot(settings), DryRunSender())
         if args.once:
             print(json.dumps(runtime.run_once(), ensure_ascii=False, indent=2))
         else:
@@ -94,7 +94,7 @@ def main(argv: list[str] | None = None) -> None:
         from .adapters.windows_ui import WindowsUiError
         from .adapters.windows_ui_receiver import WindowsUiReceiverConfig, WindowsWeComUiReceiver
 
-        workflow = WorkflowService(settings, database, DryRunBot())
+        workflow = WorkflowService(settings, database, build_bot(settings))
         receiver = WindowsWeComUiReceiver(
             settings,
             workflow.process_message,

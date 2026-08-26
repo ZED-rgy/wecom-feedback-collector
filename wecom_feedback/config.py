@@ -104,10 +104,12 @@ class Settings:
         if self.table_integration_enabled:
             if not self.smart_table_url:
                 missing.append("WECOM_SMART_TABLE_URL")
-            if not self.table_bot_api_url:
-                missing.append("WECOM_TABLE_BOT_API_URL")
-            if not (self.table_bot_id or self.table_bot_secret):
-                missing.append("WECOM_TABLE_BOT_ID 或 WECOM_TABLE_BOT_SECRET")
+            # The supported default transport is the official WeCom CLI long
+            # connection.  It does not require a user-entered HTTP endpoint.
+            # Keep table_bot_api_url as an optional override for deployments
+            # that provide their own gateway.
+            if not (self.table_bot_id and self.table_bot_secret):
+                missing.append("WECOM_TABLE_BOT_ID 和 WECOM_TABLE_BOT_SECRET")
         return missing
 
     def public_dict(self) -> dict[str, object]:

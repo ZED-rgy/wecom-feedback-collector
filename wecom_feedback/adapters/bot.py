@@ -1,8 +1,12 @@
 from __future__ import annotations
 
-from typing import Protocol, Sequence
+from typing import TYPE_CHECKING, Protocol, Sequence
 
 from ..models import FeedbackItem
+from .smart_table import CliSmartTableBot
+
+if TYPE_CHECKING:
+    from ..config import Settings
 
 
 class WeComBotAdapter(Protocol):
@@ -24,3 +28,10 @@ class DryRunBot:
         for index, item in enumerate(items, start=1):
             lines.append(f"{index}. [{item.priority}] {item.title}（{item.status}）")
         return "\n".join(lines)
+
+
+def build_bot(settings: "Settings") -> WeComBotAdapter:
+    """Select the configured smart-table bot, or a local no-op fallback."""
+    if settings.table_integration_enabled:
+        return CliSmartTableBot(settings)
+    return DryRunBot()

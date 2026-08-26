@@ -6,7 +6,7 @@ import time
 from datetime import datetime, timezone
 
 from .adapters.archive import ConversationArchiveAdapter
-from .adapters.bot import WeComBotAdapter
+from .adapters.bot import WeComBotAdapter, build_bot
 from .adapters.sender import WeComAccountSender
 from .config import Settings
 from .db import Database
@@ -90,7 +90,6 @@ class CollectorRuntime:
 
 def build_default_runtime(settings: Settings, database: Database) -> CollectorRuntime:
     from .adapters.archive import NotConfiguredArchive
-    from .adapters.bot import DryRunBot
     from .adapters.sender import DryRunSender
 
-    return CollectorRuntime(settings, database, NotConfiguredArchive(), DryRunBot(), DryRunSender())
+    return CollectorRuntime(settings, database, NotConfiguredArchive(), build_bot(settings), DryRunSender())
