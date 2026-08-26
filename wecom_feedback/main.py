@@ -91,6 +91,7 @@ def main(argv: list[str] | None = None) -> None:
         else:
             runtime.run_forever(args.poll_interval)
     if args.command == "run-ui":
+        from .adapters.windows_ui import WindowsUiError
         from .adapters.windows_ui_receiver import WindowsUiReceiverConfig, WindowsWeComUiReceiver
 
         workflow = WorkflowService(settings, database, DryRunBot())
@@ -100,7 +101,12 @@ def main(argv: list[str] | None = None) -> None:
             WindowsUiReceiverConfig(poll_seconds=args.poll_interval),
         )
         if args.once:
-            print(json.dumps({"accepted": receiver.poll_once()}, ensure_ascii=False))
+            try:
+                accepted = receiver.poll_once()
+            except WindowsUiError as exc:
+                print(json.dumps({"accepted": 0, "error": str(exc)}, ensure_ascii=False))
+            else:
+                print(json.dumps({"accepted": accepted}, ensure_ascii=False))
         else:
             receiver.run_forever()
 
