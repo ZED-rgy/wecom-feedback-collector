@@ -37,6 +37,11 @@
         <label>摘要时间（逗号分隔）<input name="summary_times" placeholder="12:00,18:00" /></label>
         <label>轮询间隔（秒）<input name="poll_interval_seconds" type="number" min="2" /></label>
         <label class="check"><input name="dry_run" type="checkbox" />dry-run（不发送真实消息）</label>
+        <label class="full">参考/目标智能表格链接<input name="smart_table_url" placeholder="粘贴企微智能表格链接" /></label>
+        <label>表格机器人接口地址<input name="table_bot_api_url" placeholder="按机器人/API文档填写" /></label>
+        <label>表格机器人 ID<input name="table_bot_id" /></label>
+        <label>表格机器人 Secret（留空表示不修改）<input name="table_bot_secret" type="password" autocomplete="off" /></label>
+        <label class="check"><input name="table_integration_enabled" type="checkbox" />启用智能表格写入</label>
       </form><div class="actions"><button onclick="saveSettings()">保存配置</button><span id="save-note" class="muted"></span></div></article>
       <article class="card span-4"><h2>演示操作</h2><p class="muted">用于验证链路，不代表真实企微消息。</p><textarea id="demo-content" placeholder="@系统反馈助手 登录后看不到订单"></textarea><div class="actions"><button class="secondary" onclick="demoIngest()">写入演示反馈</button><button class="secondary" onclick="demoSummary()">生成并发送摘要</button></div><p id="demo-note" class="muted" style="margin-top:10px"></p></article>
       <article class="card span-8"><h2>最近反馈</h2><div id="feedback-table"></div></article>
@@ -51,8 +56,8 @@
     async function refresh() {
       try {
         const [settings, health, feedback, jobs] = await Promise.all([api('/api/settings'), api('/api/health'), api('/api/feedback'), api('/api/jobs')]);
-        ['database_path','target_room_id','target_group_name','target_group_remark','target_account_id','target_account_names','context_window_seconds','summary_times','poll_interval_seconds'].forEach(k => setField(k, settings[k]));
-        setField('dry_run', settings.dry_run);
+        ['database_path','target_room_id','target_group_name','target_group_remark','target_account_id','target_account_names','context_window_seconds','summary_times','poll_interval_seconds','smart_table_url','table_bot_api_url','table_bot_id'].forEach(k => setField(k, settings[k]));
+        setField('dry_run', settings.dry_run); setField('table_integration_enabled', settings.table_integration_enabled);
         $('#status').innerHTML = `<span class="dot ${health.ok ? 'ok':'bad'}"></span>${health.ok ? '配置完整，可运行':'需要补充配置'}`;
         $('#status-note').style.display = health.missing_config.length ? 'block':'none'; $('#status-note').textContent = health.missing_config.length ? '缺少：' + health.missing_config.join('、') : '';
         $('#raw-count').textContent = health.counts.raw_messages; $('#feedback-count').textContent = health.counts.feedback_items; $('#job-count').textContent = health.counts.send_jobs;
@@ -61,7 +66,7 @@
     }
     function renderFeedback(items) { if (!items.length) return $('#feedback-table').innerHTML='<div class="empty">暂无反馈记录</div>'; $('#feedback-table').innerHTML=`<table><thead><tr><th>标题</th><th>类型</th><th>优先级</th><th>状态</th><th>提交人</th></tr></thead><tbody>${items.map(i=>`<tr><td>${esc(i.title)}<br><small>${esc(i.description)}</small></td><td>${esc(i.feedback_type)}</td><td><span class="tag">${esc(i.priority)}</span></td><td>${esc(i.status)}</td><td>${esc(i.submitter)}</td></tr>`).join('')}</tbody></table>`; }
     function renderJobs(items) { if (!items.length) return $('#jobs-table').innerHTML='<div class="empty">暂无发送任务</div>'; $('#jobs-table').innerHTML=`<table><thead><tr><th>任务</th><th>计划时间</th><th>状态</th><th>内容</th></tr></thead><tbody>${items.map(i=>`<tr><td>${esc(i.job_id)}</td><td>${esc(i.scheduled_at)}</td><td>${esc(i.status)}</td><td>${esc(i.content).replace(/\n/g,'<br>')}</td></tr>`).join('')}</tbody></table>`; }
-    async function saveSettings() { const f = new FormData($('#settings-form')); const data = Object.fromEntries(f.entries()); data.archive_enabled=false; data.dry_run=f.has('dry_run'); try { await api('/api/settings',{method:'POST',body:JSON.stringify(data)}); $('#save-note').textContent='已保存'; await refresh(); } catch(e) { $('#save-note').textContent=e.message; } }
+    async function saveSettings() { const f = new FormData($('#settings-form')); const data = Object.fromEntries(f.entries()); data.archive_enabled=false; data.table_integration_enabled=f.has('table_integration_enabled'); data.dry_run=f.has('dry_run'); try { await api('/api/settings',{method:'POST',body:JSON.stringify(data)}); $('#save-note').textContent='已保存'; await refresh(); } catch(e) { $('#save-note').textContent=e.message; } }
     async function demoIngest() { try { const data=await api('/api/demo-ingest',{method:'POST',body:JSON.stringify({content:$('#demo-content').value})}); $('#demo-note').textContent=data.accepted?'已写入':'已忽略'; await refresh(); } catch(e) { $('#demo-note').textContent=e.message; } }
     async function demoSummary() { try { const data=await api('/api/demo-summary',{method:'POST',body:'{}'}); $('#demo-note').textContent=`摘要任务 ${data.sent ? '已发送（dry-run）':'已创建'}`; await refresh(); } catch(e) { $('#demo-note').textContent=e.message; } }
     refresh();

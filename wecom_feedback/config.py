@@ -50,6 +50,11 @@ class Settings:
     summary_times: tuple[str, ...]
     poll_interval_seconds: int
     dry_run: bool
+    table_integration_enabled: bool = False
+    smart_table_url: str = ""
+    table_bot_api_url: str = ""
+    table_bot_id: str = ""
+    table_bot_secret: str = ""
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -69,6 +74,11 @@ class Settings:
             summary_times=_csv_env("WECOM_SUMMARY_TIMES") or ("12:00", "18:00"),
             poll_interval_seconds=int(os.getenv("WECOM_POLL_INTERVAL_SECONDS", "10")),
             dry_run=_bool_env("WECOM_DRY_RUN", True),
+            table_integration_enabled=_bool_env("WECOM_TABLE_INTEGRATION_ENABLED", False),
+            smart_table_url=os.getenv("WECOM_SMART_TABLE_URL", "").strip(),
+            table_bot_api_url=os.getenv("WECOM_TABLE_BOT_API_URL", "").strip(),
+            table_bot_id=os.getenv("WECOM_TABLE_BOT_ID", "").strip(),
+            table_bot_secret=os.getenv("WECOM_TABLE_BOT_SECRET", "").strip(),
         )
 
     def missing_required(self) -> list[str]:
@@ -91,6 +101,13 @@ class Settings:
             ):
                 if not value:
                     missing.append(field)
+        if self.table_integration_enabled:
+            if not self.smart_table_url:
+                missing.append("WECOM_SMART_TABLE_URL")
+            if not self.table_bot_api_url:
+                missing.append("WECOM_TABLE_BOT_API_URL")
+            if not (self.table_bot_id or self.table_bot_secret):
+                missing.append("WECOM_TABLE_BOT_ID 或 WECOM_TABLE_BOT_SECRET")
         return missing
 
     def public_dict(self) -> dict[str, object]:
@@ -109,6 +126,11 @@ class Settings:
             "summary_times": ", ".join(self.summary_times),
             "poll_interval_seconds": self.poll_interval_seconds,
             "dry_run": self.dry_run,
+            "table_integration_enabled": self.table_integration_enabled,
+            "smart_table_url": self.smart_table_url,
+            "table_bot_api_url": self.table_bot_api_url,
+            "table_bot_id": self.table_bot_id,
+            "table_bot_secret_configured": bool(self.table_bot_secret),
         }
 
 
@@ -129,12 +151,21 @@ def save_env(values: dict[str, object], path: Path = ENV_FILE) -> None:
         "WECOM_SUMMARY_TIMES": values.get("summary_times", "12:00,18:00"),
         "WECOM_POLL_INTERVAL_SECONDS": values.get("poll_interval_seconds", 10),
         "WECOM_DRY_RUN": str(values.get("dry_run", True)).lower(),
+        "WECOM_TABLE_INTEGRATION_ENABLED": str(values.get("table_integration_enabled", False)).lower(),
+        "WECOM_SMART_TABLE_URL": values.get("smart_table_url", ""),
+        "WECOM_TABLE_BOT_API_URL": values.get("table_bot_api_url", ""),
+        "WECOM_TABLE_BOT_ID": values.get("table_bot_id", ""),
     }
     secret = str(values.get("archive_secret", "")).strip()
     if secret:
         mapping["WECOM_ARCHIVE_SECRET"] = secret
     elif os.getenv("WECOM_ARCHIVE_SECRET"):
         mapping["WECOM_ARCHIVE_SECRET"] = os.environ["WECOM_ARCHIVE_SECRET"]
+    table_bot_secret = str(values.get("table_bot_secret", "")).strip()
+    if table_bot_secret:
+        mapping["WECOM_TABLE_BOT_SECRET"] = table_bot_secret
+    elif os.getenv("WECOM_TABLE_BOT_SECRET"):
+        mapping["WECOM_TABLE_BOT_SECRET"] = os.environ["WECOM_TABLE_BOT_SECRET"]
     lines = ["# Managed by the local WeCom feedback dashboard", ""]
     lines.extend(f"{key}={str(value).strip()}" for key, value in mapping.items())
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
