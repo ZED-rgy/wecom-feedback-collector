@@ -36,7 +36,7 @@ Windows 桌面发送第一阶段使用 [windows_ui.py](wecom_feedback/adapters/w
 
 ## 桌面常驻运行
 
-运行 `python -m pip install -e ".[windows,desktop]"` 后执行 `python -m wecom_feedback desktop`。程序会驻留 Windows 系统托盘，同时启动本地配置页、消息接收器和摘要调度器；关闭浏览器不会停止程序。托盘菜单可重新打开控制台或安全退出。
+运行 `python -m pip install -e ".[windows,desktop]"` 后执行 `python -m wecom_feedback desktop`。程序会使用系统 WebView2 显示内嵌配置窗口，并同时驻留 Windows 系统托盘、启动消息接收器和摘要调度器。关闭配置窗口只会隐藏到托盘；托盘菜单可重新打开窗口或安全退出。若系统缺少内嵌组件，程序会自动回退到浏览器配置页。
 
 配置页可启用“登录 Windows 后自动启动”。该功能写入当前用户的 `HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run`，不需要管理员权限，也可随时取消。自动发送默认关闭；只有同时关闭 dry-run 并显式开启自动发送后，计划任务才会通过已登录的企微账号发送。
 
