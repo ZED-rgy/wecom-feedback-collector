@@ -62,3 +62,12 @@ def build_sender(settings: Settings) -> WeComAccountSender:
     if not settings.target_group_name:
         return DisabledSender()
     return WindowsScheduledSender(settings.target_group_name, settings.target_group_remark)
+
+
+def build_manual_sender(settings: Settings) -> WeComAccountSender:
+    """Build a sender for an operator-confirmed "send now" action."""
+    if settings.dry_run:
+        return DryRunSender()
+    if not settings.target_group_name:
+        return DisabledSender()
+    return WindowsScheduledSender(settings.target_group_name, settings.target_group_remark)

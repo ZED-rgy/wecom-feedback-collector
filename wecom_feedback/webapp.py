@@ -3,7 +3,8 @@ from __future__ import annotations
 import json
 import logging
 import threading
-from datetime import datetime, timezone
+from collections import Counter
+from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
@@ -18,6 +19,107 @@ from .services.workflow import WorkflowService
 
 WEB_ROOT = Path(__file__).resolve().parent.parent / "web"
 logger = logging.getLogger("wecom_feedback.webapp")
+
+
+def _next_summary_at(settings: Settings) -> str:
+    now = datetime.now().astimezone()
+    candidates: list[datetime] = []
+    for offset in (0, 1):
+        day = now.date() + timedelta(days=offset)
+        for value in settings.summary_times:
+            try:
+                hour, minute = (int(part) for part in value.split(":", 1))
+                candidate = datetime.combine(day, datetime.min.time(), tzinfo=now.tzinfo).replace(
+                    hour=hour, minute=minute
+                )
+            except (ValueError, TypeError):
+                continue
+            if candidate > now:
+                candidates.append(candidate)
+    return min(candidates).isoformat() if candidates else ""
+
+
+def _activity(database: Database, room_key: str, limit: int = 40) -> list[dict[str, object]]:
+    events: list[dict[str, object]] = []
+    for message in database.list_messages(room_key, limit=limit):
+        events.append(
+            {
+                "id": message["message_id"],
+                "kind": "message",
+                "title": f"收到 {message['sender_name']} 的群消息",
+                "detail": message["content"],
+                "status": "success",
+                "created_at": message["created_at"],
+            }
+        )
+    for job in database.list_jobs(limit=limit):
+        status = str(job["status"])
+        events.append(
+            {
+                "id": job["job_id"],
+                "kind": "send",
+                "title": {"sent": "摘要已发送", "pending": "摘要等待发送", "cancelled": "摘要任务已取消"}.get(
+                    status, "摘要发送任务"
+                ),
+                "detail": job["last_error"] or str(job["content"]).splitlines()[0],
+                "status": "error" if job["last_error"] else ("success" if status == "sent" else "pending"),
+                "created_at": job["scheduled_at"],
+            }
+        )
+    events.sort(key=lambda item: str(item["created_at"]), reverse=True)
+    return events[:limit]
+
+
+def _dashboard_snapshot(settings: Settings, database: Database) -> dict[str, object]:
+    room_key = settings.target_room_id or settings.target_group_name
+    feedback = database.list_feedback(room_key)
+    jobs = database.list_jobs()
+    local = LOCAL_RECEIVER.status()
+    runtime = SUMMARY_SCHEDULER.status()
+    sync = database.smart_table_sync_counts(room_key)
+    today = datetime.now().astimezone().date()
+    today_feedback = sum(1 for item in feedback if item.created_at.astimezone().date() == today)
+    status_counts = Counter(item.status for item in feedback)
+    alerts: list[dict[str, str]] = []
+    if local["last_error"]:
+        alerts.append({"level": "error", "title": "群消息接收异常", "detail": str(local["last_error"])})
+    if runtime["last_error"]:
+        alerts.append({"level": "error", "title": "摘要调度异常", "detail": str(runtime["last_error"])})
+    failed_jobs = [job for job in jobs if job["last_error"]]
+    if failed_jobs:
+        alerts.append({"level": "warning", "title": "存在发送失败任务", "detail": failed_jobs[0]["last_error"]})
+    pipeline = [
+        {"key": "receive", "name": "接收群消息", "status": "ok" if local["running"] and not local["last_error"] else "error", "detail": f"累计处理 {local['processed_total']} 条"},
+        {"key": "organize", "name": "整理反馈", "status": "ok", "detail": f"已形成 {len(feedback)} 条记录"},
+        {"key": "table", "name": "写入智能表格", "status": "ok" if settings.table_integration_enabled and sync["pending"] == 0 else "warning", "detail": f"已同步 {sync['synced']}，待同步 {sync['pending']}"},
+        {"key": "summary", "name": "生成摘要", "status": "ok" if runtime["running"] else "error", "detail": f"下次 {_next_summary_at(settings) or '未设置'}"},
+        {"key": "send", "name": "发送到群", "status": "ok" if settings.auto_send_enabled else "paused", "detail": "自动发送已开启" if settings.auto_send_enabled else "自动发送已暂停"},
+    ]
+    return {
+        "group_name": settings.target_group_name,
+        "account_name": "、".join(settings.target_account_names),
+        "today_feedback": today_feedback,
+        "total_feedback": len(feedback),
+        "pending_review": status_counts.get("待确认", 0),
+        "pending_sync": sync["pending"],
+        "pending_jobs": sum(1 for job in jobs if job["status"] == "pending"),
+        "next_summary_at": _next_summary_at(settings),
+        "auto_send_enabled": settings.auto_send_enabled,
+        "local_reader": local,
+        "scheduler": runtime,
+        "sync": sync,
+        "pipeline": pipeline,
+        "alerts": alerts,
+        "recent_activity": _activity(database, room_key, 8),
+    }
+
+
+def _feedback_payload(database: Database, item: object) -> dict[str, object]:
+    values = dict(item.__dict__)
+    feedback_id = str(values["feedback_id"])
+    values["smart_table_synced"] = bool(database.get_state(f"smart_table_synced:{feedback_id}"))
+    values["included_in_summary"] = values["status"] not in {"已忽略", "已完成"}
+    return values
 
 
 class LocalReceiverController:
@@ -203,11 +305,38 @@ class DashboardHandler(BaseHTTPRequestHandler):
             from .health import check_health
 
             return self._json(check_health(settings, database).as_dict())
+        if path == "/api/dashboard":
+            return self._json(_dashboard_snapshot(settings, database))
         if path == "/api/feedback":
             room_key = settings.target_room_id or settings.target_group_name
-            return self._json([item.__dict__ for item in database.list_feedback(room_key)])
+            return self._json([_feedback_payload(database, item) for item in database.list_feedback(room_key)])
+        if path == "/api/messages":
+            room_key = settings.target_room_id or settings.target_group_name
+            return self._json(database.list_messages(room_key))
         if path == "/api/jobs":
             return self._json(database.list_jobs())
+        if path == "/api/activity":
+            room_key = settings.target_room_id or settings.target_group_name
+            return self._json(_activity(database, room_key))
+        if path == "/api/summary/preview":
+            from .services.summary import select_summary_items
+
+            room_key = settings.target_room_id or settings.target_group_name
+            candidates = [
+                item for item in database.list_feedback(room_key)
+                if item.status not in {"已忽略", "已完成"}
+            ]
+            selected = select_summary_items(candidates)
+            content = build_bot(settings).render_summary(selected)
+            return self._json(
+                {
+                    "content": content,
+                    "items": [_feedback_payload(database, item) for item in selected],
+                    "next_summary_at": _next_summary_at(settings),
+                    "target_group": settings.target_group_name,
+                    "auto_send_enabled": settings.auto_send_enabled,
+                }
+            )
         if path == "/api/local-reader/status":
             return self._json(LOCAL_RECEIVER.status())
         if path == "/api/runtime/status":
@@ -256,6 +385,56 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 return self._json(LOCAL_RECEIVER.start())
             if path == "/api/local-reader/stop":
                 return self._json(LOCAL_RECEIVER.stop())
+            if path in {"/api/feedback/update", "/api/feedback/ignore"}:
+                feedback_id = str(payload.get("feedback_id", "")).strip()
+                if not feedback_id:
+                    return self._json({"error": "feedback_id is required"}, 400)
+                values = dict(payload.get("values", {})) if isinstance(payload.get("values"), dict) else {}
+                if path.endswith("/ignore"):
+                    values = {"status": "已忽略"}
+                item = database.update_feedback(feedback_id, values)
+                if item is None:
+                    return self._json({"error": "feedback not found"}, 404)
+                sync_error = ""
+                if settings.table_integration_enabled and not settings.dry_run:
+                    try:
+                        build_bot(settings).upsert_feedback(item)
+                        database.set_state(f"smart_table_synced:{feedback_id}", "1")
+                    except Exception as exc:
+                        database.delete_state(f"smart_table_synced:{feedback_id}")
+                        sync_error = str(exc)
+                return self._json({"item": _feedback_payload(database, item), "sync_error": sync_error})
+            if path == "/api/feedback/resync":
+                feedback_id = str(payload.get("feedback_id", "")).strip()
+                item = database.get_feedback(feedback_id)
+                if item is None:
+                    return self._json({"error": "feedback not found"}, 404)
+                if not settings.table_integration_enabled:
+                    return self._json({"error": "智能表格写入尚未启用"}, 400)
+                if settings.dry_run:
+                    return self._json({"error": "dry-run 模式不会写入智能表格"}, 400)
+                database.delete_state(f"smart_table_synced:{feedback_id}")
+                build_bot(settings).upsert_feedback(item)
+                database.set_state(f"smart_table_synced:{feedback_id}", "1")
+                return self._json({"synced": True})
+            if path in {"/api/summary/create", "/api/summary/send-now"}:
+                feedback_ids = payload.get("feedback_ids")
+                selected_ids = [str(value) for value in feedback_ids] if isinstance(feedback_ids, list) else None
+                content = str(payload.get("content", "")).strip() or None
+                real_workflow = WorkflowService(settings, database, build_bot(settings))
+                job = real_workflow.schedule_summary(
+                    scheduled_at=datetime.now(timezone.utc), feedback_ids=selected_ids, content=content
+                )
+                sent = False
+                if path.endswith("/send-now"):
+                    from .adapters.sender import build_manual_sender
+
+                    sent = real_workflow.dispatch_job(job.job_id, build_manual_sender(settings))
+                return self._json({"job_id": job.job_id, "sent": sent, "status": database.get_job(job.job_id).status})
+            if path == "/api/jobs/cancel":
+                return self._json({"cancelled": database.cancel_job(str(payload.get("job_id", "")))})
+            if path == "/api/jobs/retry":
+                return self._json({"retried": database.retry_job(str(payload.get("job_id", "")))})
             if path == "/api/demo-ingest":
                 content = str(payload.get("content", "")).strip()
                 if not content:

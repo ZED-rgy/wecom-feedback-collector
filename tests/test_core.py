@@ -154,6 +154,33 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(stored["status"], "pending")
         self.assertEqual(stored["retry_count"], 1)
 
+    def test_feedback_can_be_edited_and_sync_status_reported(self):
+        message = RawMessage(
+            message_id="edit-1", seq=9, account_id="customer", room_id="room-1",
+            group_name="客户群", group_remark="", sender_id="customer", sender_name="客户E",
+            message_type="text", raw_content="@系统反馈助手 原始问题",
+            content="@系统反馈助手 原始问题", mentioned_account=True,
+        )
+        workflow = WorkflowService(self.settings, self.db, DryRunBot())
+        self.assertTrue(workflow.process_message(message))
+        item = self.db.feedback_for_message("edit-1")
+        updated = self.db.update_feedback(item.feedback_id, {"title": "修改后的问题", "priority": "P1"})
+        self.assertEqual(updated.title, "修改后的问题")
+        self.assertEqual(updated.priority, "P1")
+        self.db.set_state(f"smart_table_synced:{item.feedback_id}", "1")
+        self.assertEqual(self.db.smart_table_sync_counts("room-1"), {"total": 1, "synced": 1, "pending": 0})
+
+    def test_one_summary_job_can_be_cancelled_and_retried(self):
+        job = SendJob(
+            job_id="cancel-1", room_id="room-1", content="摘要",
+            scheduled_at=datetime.now(timezone.utc),
+        )
+        self.db.create_send_job(job)
+        self.assertTrue(self.db.cancel_job(job.job_id))
+        self.assertEqual(self.db.get_job(job.job_id).status, "cancelled")
+        self.assertTrue(self.db.retry_job(job.job_id))
+        self.assertEqual(self.db.get_job(job.job_id).status, "pending")
+
     def test_ui_receiver_filters_and_deduplicates_mentions(self):
         received = []
         receiver = WindowsWeComUiReceiver(self.settings, received.append)

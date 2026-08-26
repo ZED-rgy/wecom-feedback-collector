@@ -95,6 +95,10 @@ class Database:
                 (key, value),
             )
 
+    def delete_state(self, key: str) -> None:
+        with self.connect() as conn:
+            conn.execute("DELETE FROM sync_state WHERE state_key=?", (key,))
+
     def insert_message(self, message: RawMessage) -> bool:
         with self.connect() as conn:
             cursor = conn.execute(
@@ -209,6 +213,93 @@ class Database:
                 for row in rows
             ]
 
+    def get_feedback(self, feedback_id: str) -> FeedbackItem | None:
+        with self.connect() as conn:
+            row = conn.execute("SELECT * FROM feedback_items WHERE feedback_id=?", (feedback_id,)).fetchone()
+        return self._feedback_from_row(row) if row else None
+
+    def feedback_by_ids(self, feedback_ids: list[str]) -> list[FeedbackItem]:
+        if not feedback_ids:
+            return []
+        placeholders = ",".join("?" for _ in feedback_ids)
+        with self.connect() as conn:
+            rows = conn.execute(
+                f"SELECT * FROM feedback_items WHERE feedback_id IN ({placeholders}) ORDER BY created_at DESC",
+                feedback_ids,
+            ).fetchall()
+        return [self._feedback_from_row(row) for row in rows]
+
+    def update_feedback(self, feedback_id: str, values: dict[str, object]) -> FeedbackItem | None:
+        allowed = {"title", "description", "feedback_type", "priority", "status", "need_more_info"}
+        updates = {key: value for key, value in values.items() if key in allowed}
+        if not updates:
+            return self.get_feedback(feedback_id)
+        updates["updated_at"] = datetime.now(timezone.utc).isoformat()
+        assignments = ", ".join(f"{key}=?" for key in updates)
+        with self.connect() as conn:
+            conn.execute(
+                f"UPDATE feedback_items SET {assignments} WHERE feedback_id=?",
+                [*updates.values(), feedback_id],
+            )
+        return self.get_feedback(feedback_id)
+
+    @staticmethod
+    def _feedback_from_row(row: sqlite3.Row) -> FeedbackItem:
+        return FeedbackItem(
+            feedback_id=row["feedback_id"],
+            room_id=row["room_id"],
+            account_id=row["account_id"],
+            submitter=row["submitter"],
+            feedback_type=row["feedback_type"],
+            title=row["title"],
+            description=row["description"],
+            priority=row["priority"],
+            status=row["status"],
+            source_message_ids=tuple(json.loads(row["source_message_ids_json"])),
+            confidence=float(row["confidence"]),
+            need_more_info=bool(row["need_more_info"]),
+            created_at=datetime.fromisoformat(row["created_at"]),
+            updated_at=datetime.fromisoformat(row["updated_at"]),
+        )
+
+    def list_messages(self, room_id: str, limit: int = 100) -> list[dict[str, object]]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT message_id, sender_name, message_type, content, mentioned_account, created_at, payload_json "
+                "FROM raw_messages WHERE room_id=? ORDER BY created_at DESC LIMIT ?",
+                (room_id, limit),
+            ).fetchall()
+        result: list[dict[str, object]] = []
+        for row in rows:
+            payload = json.loads(row["payload_json"] or "{}")
+            result.append(
+                {
+                    "message_id": row["message_id"],
+                    "sender_name": row["sender_name"],
+                    "message_type": row["message_type"],
+                    "content": row["content"],
+                    "mentioned_account": bool(row["mentioned_account"]),
+                    "created_at": row["created_at"],
+                    "source": "本地数据库" if row["message_id"].startswith("local-") else payload.get("source", "界面识别"),
+                }
+            )
+        return result
+
+    def smart_table_sync_counts(self, room_id: str) -> dict[str, int]:
+        with self.connect() as conn:
+            total = int(
+                conn.execute("SELECT COUNT(*) AS n FROM feedback_items WHERE room_id=?", (room_id,)).fetchone()["n"]
+            )
+            synced = int(
+                conn.execute(
+                    "SELECT COUNT(*) AS n FROM feedback_items f JOIN sync_state s "
+                    "ON s.state_key='smart_table_synced:' || f.feedback_id "
+                    "WHERE f.room_id=? AND s.state_value='1'",
+                    (room_id,),
+                ).fetchone()["n"]
+            )
+        return {"total": total, "synced": synced, "pending": max(0, total - synced)}
+
     def create_send_job(self, job: SendJob) -> None:
         with self.connect() as conn:
             conn.execute(
@@ -241,6 +332,53 @@ class Database:
                 (limit,),
             ).fetchall()
             return [dict(row) for row in rows]
+
+    def get_job(self, job_id: str) -> SendJob | None:
+        with self.connect() as conn:
+            row = conn.execute("SELECT * FROM send_jobs WHERE job_id=?", (job_id,)).fetchone()
+        if row is None:
+            return None
+        return SendJob(
+            job_id=row["job_id"], room_id=row["room_id"], content=row["content"],
+            scheduled_at=datetime.fromisoformat(row["scheduled_at"]), status=row["status"],
+            retry_count=row["retry_count"], last_error=row["last_error"],
+        )
+
+    def cancel_job(self, job_id: str) -> bool:
+        with self.connect() as conn:
+            cursor = conn.execute(
+                "UPDATE send_jobs SET status='cancelled', last_error='', claimed_at=NULL "
+                "WHERE job_id=? AND status IN ('pending','claimed')",
+                (job_id,),
+            )
+            return cursor.rowcount == 1
+
+    def retry_job(self, job_id: str) -> bool:
+        with self.connect() as conn:
+            cursor = conn.execute(
+                "UPDATE send_jobs SET status='pending', scheduled_at=?, last_error='', claimed_at=NULL "
+                "WHERE job_id=? AND status IN ('pending','failed','cancelled')",
+                (datetime.now(timezone.utc).isoformat(), job_id),
+            )
+            return cursor.rowcount == 1
+
+    def claim_job(self, job_id: str) -> SendJob | None:
+        now = datetime.now(timezone.utc).isoformat()
+        with self.connect() as conn:
+            row = conn.execute("SELECT * FROM send_jobs WHERE job_id=? AND status='pending'", (job_id,)).fetchone()
+            if row is None:
+                return None
+            cursor = conn.execute(
+                "UPDATE send_jobs SET status='claimed', claimed_at=? WHERE job_id=? AND status='pending'",
+                (now, job_id),
+            )
+            if cursor.rowcount != 1:
+                return None
+        return SendJob(
+            job_id=row["job_id"], room_id=row["room_id"], content=row["content"],
+            scheduled_at=datetime.fromisoformat(row["scheduled_at"]), status="claimed",
+            retry_count=row["retry_count"], last_error=row["last_error"],
+        )
 
     def claim_due_jobs(self, limit: int = 10) -> list[SendJob]:
         now_dt = datetime.now(timezone.utc)

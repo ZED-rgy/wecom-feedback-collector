@@ -6,10 +6,7 @@ from collections.abc import Sequence
 from ..models import FeedbackItem
 
 
-def render_feedback_summary(items: Sequence[FeedbackItem]) -> str:
-    if not items:
-        return "本时段暂无新的需求或问题。"
-
+def select_summary_items(items: Sequence[FeedbackItem]) -> list[FeedbackItem]:
     # When the local-store receiver is active its stable message IDs and sender
     # identities are more reliable than earlier OCR observations of the same
     # chat. Keep OCR as a fallback, but do not mix both sources in one summary.
@@ -18,7 +15,14 @@ def render_feedback_summary(items: Sequence[FeedbackItem]) -> str:
         for item in items
         if any(message_id.startswith("local-") for message_id in item.source_message_ids)
     ]
-    selected = local_items or list(items)
+    return local_items or list(items)
+
+
+def render_feedback_summary(items: Sequence[FeedbackItem]) -> str:
+    if not items:
+        return "本时段暂无新的需求或问题。"
+
+    selected = select_summary_items(items)
 
     grouped: OrderedDict[tuple[str, str, str], tuple[FeedbackItem, int]] = OrderedDict()
     for item in selected:

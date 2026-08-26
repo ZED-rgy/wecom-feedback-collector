@@ -44,20 +44,44 @@ class WorkflowService:
             self.bot.upsert_feedback(item)
         return True
 
-    def schedule_summary(self, scheduled_at: datetime | None = None) -> SendJob:
+    def schedule_summary(
+        self,
+        scheduled_at: datetime | None = None,
+        feedback_ids: list[str] | None = None,
+        content: str | None = None,
+    ) -> SendJob:
         scheduled_at = scheduled_at or datetime.now(timezone.utc)
         room_key = self.settings.target_room_id or self.settings.target_group_name
-        items = self.database.list_feedback(room_key)
-        content = self.bot.render_summary(items)
+        items = (
+            self.database.feedback_by_ids(feedback_ids)
+            if feedback_ids is not None
+            else self.database.list_feedback(room_key)
+        )
+        items = [item for item in items if item.status not in {"已忽略", "已完成"}]
+        rendered_content = content.strip() if content and content.strip() else self.bot.render_summary(items)
         digest = sha1(f"{room_key}:{scheduled_at.isoformat()}".encode()).hexdigest()[:12]
         job = SendJob(
             job_id=f"SUMMARY-{scheduled_at.strftime('%Y%m%d%H%M')}-{digest}",
             room_id=room_key,
-            content=content,
+            content=rendered_content,
             scheduled_at=scheduled_at,
         )
         self.database.create_send_job(job)
         return job
+
+    def dispatch_job(self, job_id: str, sender: WeComAccountSender) -> bool:
+        if not sender.is_ready():
+            return False
+        job = self.database.claim_job(job_id)
+        if job is None:
+            return False
+        try:
+            sender.send_text(job.room_id, job.content)
+        except Exception as exc:
+            self.database.finish_job(job.job_id, success=False, error=str(exc))
+            raise
+        self.database.finish_job(job.job_id, success=True)
+        return True
 
     def dispatch_due_jobs(self, sender: WeComAccountSender, limit: int = 10) -> int:
         if not sender.is_ready():
