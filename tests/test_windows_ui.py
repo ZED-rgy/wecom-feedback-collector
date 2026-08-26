@@ -5,6 +5,7 @@ from wecom_feedback.adapters.windows_ui import (
     ConfirmationRequired,
     WindowsUiConfig,
     WindowsWeComUiSender,
+    _belongs_to_same_process,
     _normalized_text,
 )
 
@@ -22,6 +23,14 @@ class WindowsUiSenderTests(unittest.TestCase):
 
     def test_clipboard_comparison_normalizes_line_endings(self):
         self.assertEqual(_normalized_text("第一行\r\n第二行  "), "第一行\n第二行")
+
+    @patch("wecom_feedback.adapters.windows_ui._window_process_id", side_effect=[9001, 9001])
+    def test_auxiliary_wecom_window_is_accepted_as_same_process(self, _process_id):
+        self.assertTrue(_belongs_to_same_process(202, 101))
+
+    @patch("wecom_feedback.adapters.windows_ui._window_process_id", side_effect=[7001, 9001])
+    def test_unrelated_foreground_window_is_rejected(self, _process_id):
+        self.assertFalse(_belongs_to_same_process(202, 101))
 
     @patch("wecom_feedback.adapters.windows_ui._verify_group_header")
     @patch("wecom_feedback.adapters.windows_ui._restore_control_window")

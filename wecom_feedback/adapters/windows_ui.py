@@ -89,6 +89,18 @@ def _foreground_window() -> int:
     return int(ctypes.windll.user32.GetForegroundWindow())
 
 
+def _window_process_id(hwnd: int) -> int:
+    process_id = ctypes.c_ulong()
+    ctypes.windll.user32.GetWindowThreadProcessId(hwnd, ctypes.byref(process_id))
+    return int(process_id.value)
+
+
+def _belongs_to_same_process(candidate_hwnd: int, target_hwnd: int) -> bool:
+    candidate_pid = _window_process_id(candidate_hwnd)
+    target_pid = _window_process_id(target_hwnd)
+    return bool(candidate_pid and candidate_pid == target_pid)
+
+
 def _normalized_text(value: str) -> str:
     lines = [re.sub(r"[ \t]+", " ", line).rstrip() for line in value.replace("\r\n", "\n").split("\n")]
     return "\n".join(lines).strip()
@@ -179,8 +191,17 @@ def _verify_group_header(hwnd: int, group_name: str, min_confidence: float) -> N
         from rapidocr_onnxruntime import RapidOCR
     except ImportError as exc:  # pragma: no cover - Windows-only dependencies
         raise WindowsUiError("安全发送需要 rapidocr-onnxruntime 以核对目标群") from exc
-    if _foreground_window() != hwnd:
-        raise WindowsUiError("企微窗口已失去焦点，已终止发送")
+    foreground = _foreground_window()
+    if foreground != hwnd:
+        same_process = _belongs_to_same_process(foreground, hwnd)
+        logger.info(
+            "WeCom foreground changed during verification: target_hwnd=%s foreground_hwnd=%s same_process=%s",
+            hwnd,
+            foreground,
+            same_process,
+        )
+        if not same_process:
+            raise WindowsUiError("企微窗口已失去焦点，已终止发送")
     if _OCR_ENGINE is None:
         _OCR_ENGINE = RapidOCR()
     left, top, right, bottom = _window_rect(hwnd)
