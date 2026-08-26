@@ -15,6 +15,7 @@ from wecom_feedback.adapters.bot import DryRunBot
 from wecom_feedback.runtime import CollectorRuntime
 from wecom_feedback.adapters.windows_ui_receiver import WindowsWeComUiReceiver
 from wecom_feedback.models import SendJob
+from wecom_feedback.adapters.sender import DeliveryUnconfirmed
 
 
 class CoreTests(unittest.TestCase):
@@ -153,6 +154,26 @@ class CoreTests(unittest.TestCase):
         stored = self.db.list_jobs()[0]
         self.assertEqual(stored["status"], "pending")
         self.assertEqual(stored["retry_count"], 1)
+
+    def test_unconfirmed_send_is_not_automatically_retried(self):
+        class UnconfirmedSender:
+            def is_ready(self):
+                return True
+
+            def send_text(self, room_id, content):
+                raise DeliveryUnconfirmed("无法确认")
+
+        job = SendJob(
+            job_id="uncertain-1", room_id="room-1", content="摘要",
+            scheduled_at=datetime.now(timezone.utc),
+        )
+        self.db.create_send_job(job)
+        workflow = WorkflowService(self.settings, self.db, DryRunBot())
+        self.assertEqual(workflow.dispatch_due_jobs(UnconfirmedSender()), 0)
+        self.assertEqual(self.db.get_job(job.job_id).status, "unconfirmed")
+        self.assertEqual(self.db.claim_due_jobs(), [])
+        self.assertTrue(self.db.retry_job(job.job_id))
+        self.assertEqual(self.db.get_job(job.job_id).status, "pending")
 
     def test_feedback_can_be_edited_and_sync_status_reported(self):
         message = RawMessage(

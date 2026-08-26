@@ -21,7 +21,7 @@ import sqlite3
 import struct
 import time
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, Iterable
 
@@ -837,6 +837,41 @@ class WindowsWeComLocalDbReceiver:
                 client_version=self._client_version,
                 error=str(exc),
             )
+
+    def has_recent_message(self, content: str, since: datetime) -> bool:
+        """Check whether exact text reached the configured group after ``since``."""
+        expected = "\n".join(line.rstrip() for line in content.replace("\r\n", "\n").split("\n")).strip()
+        connections = self._open_snapshots()
+        try:
+            _conversation_id, rows, _names = self._target_rows(connections)
+            threshold = since.astimezone(timezone.utc) - timedelta(seconds=10)
+            for row in reversed(rows):
+                sent_at = _message_datetime(row["send_time"])
+                if sent_at < threshold:
+                    break
+                decoded = decode_message_text(row["content"])
+                if not decoded:
+                    continue
+                observed = "\n".join(
+                    line.rstrip() for line in decoded.replace("\r\n", "\n").split("\n")
+                ).strip()
+                if observed == expected:
+                    return True
+            return False
+        finally:
+            for connection in connections.values():
+                connection.close()
+
+    def wait_for_message(
+        self, content: str, since: datetime, timeout_seconds: float = 25, poll_seconds: float = 2
+    ) -> bool:
+        deadline = time.monotonic() + max(1, timeout_seconds)
+        while True:
+            if self.has_recent_message(content, since):
+                return True
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(max(0.5, min(poll_seconds, deadline - time.monotonic())))
 
     def run_forever(self, poll_seconds: float | None = None) -> None:
         self._stop = False

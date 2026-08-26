@@ -32,7 +32,7 @@ python -m wecom_feedback desktop
 
 `run-ui` 是 OCR/UI 兼容入口。它需要打开目标群并保持窗口可见，仅在本地数据库读取暂不支持某个企微版本时使用。
 
-Windows 桌面发送第一阶段使用 [windows_ui.py](wecom_feedback/adapters/windows_ui.py)：先定位窗口、搜索目标群并填入文本，默认不会点击发送；必须经过人工视觉确认后显式调用 `confirm_and_send`。安装桌面依赖：`python -m pip install -e ".[windows]"`。
+Windows 桌面发送使用 [windows_ui.py](wecom_feedback/adapters/windows_ui.py)：最大化企微后通过 `Ctrl+F` 搜索目标群，不再点击固定坐标；发送前 OCR 核对群名，并从消息编辑器复制回读全文。按下 Enter 后还必须在企微本地消息库中找到完全相同的消息才会标记为成功。若无法确认，任务进入“待人工确认”且不会自动重试。安装桌面依赖：`python -m pip install -e ".[windows]"`。
 
 ## 桌面常驻运行
 

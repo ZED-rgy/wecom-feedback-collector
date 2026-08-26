@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from hashlib import sha1
 
 from ..adapters.bot import WeComBotAdapter
-from ..adapters.sender import WeComAccountSender
+from ..adapters.sender import DeliveryUnconfirmed, WeComAccountSender
 from ..config import Settings
 from ..db import Database
 from ..models import RawMessage, SendJob
@@ -79,6 +79,9 @@ class WorkflowService:
             return False
         try:
             sender.send_text(job.room_id, job.content)
+        except DeliveryUnconfirmed as exc:
+            self.database.mark_job_unconfirmed(job.job_id, str(exc))
+            return False
         except Exception as exc:
             self.database.finish_job(job.job_id, success=False, error=str(exc))
             raise
@@ -93,6 +96,8 @@ class WorkflowService:
         for job in self.database.claim_due_jobs(limit):
             try:
                 sender.send_text(job.room_id, job.content)
+            except DeliveryUnconfirmed as exc:
+                self.database.mark_job_unconfirmed(job.job_id, str(exc))
             except Exception as exc:
                 self.database.finish_job(job.job_id, success=False, error=str(exc))
             else:

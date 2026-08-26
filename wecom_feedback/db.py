@@ -357,10 +357,17 @@ class Database:
         with self.connect() as conn:
             cursor = conn.execute(
                 "UPDATE send_jobs SET status='pending', scheduled_at=?, last_error='', claimed_at=NULL "
-                "WHERE job_id=? AND status IN ('pending','failed','cancelled')",
+                "WHERE job_id=? AND status IN ('pending','failed','cancelled','unconfirmed')",
                 (datetime.now(timezone.utc).isoformat(), job_id),
             )
             return cursor.rowcount == 1
+
+    def mark_job_unconfirmed(self, job_id: str, error: str) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                "UPDATE send_jobs SET status='unconfirmed', last_error=?, claimed_at=NULL WHERE job_id=?",
+                (error, job_id),
+            )
 
     def claim_job(self, job_id: str) -> SendJob | None:
         now = datetime.now(timezone.utc).isoformat()

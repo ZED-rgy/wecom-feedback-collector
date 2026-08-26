@@ -47,7 +47,7 @@ def _activity(database: Database, room_key: str, limit: int = 40) -> list[dict[s
             {
                 "id": job["job_id"],
                 "kind": "send",
-                "title": {"sent": "摘要已发送", "pending": "摘要等待发送", "cancelled": "摘要任务已取消"}.get(
+                "title": {"sent": "摘要已发送", "pending": "摘要等待发送", "cancelled": "摘要任务已取消", "unconfirmed": "摘要发送待人工确认"}.get(
                     status, "摘要发送任务"
                 ),
                 "detail": job["last_error"] or str(job["content"]).splitlines()[0],

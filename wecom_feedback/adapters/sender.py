@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Protocol
 
 from ..config import Settings
@@ -31,6 +32,10 @@ class DisabledSender:
         raise RuntimeError("automatic WeCom account sending is disabled")
 
 
+class DeliveryUnconfirmed(RuntimeError):
+    """Enter was emitted, but the target group database did not confirm delivery."""
+
+
 class WindowsScheduledSender:
     """Send an already scheduled message through the signed-in desktop account.
 
@@ -39,19 +44,26 @@ class WindowsScheduledSender:
     the exact payload before the final Enter key is emitted.
     """
 
-    def __init__(self, group_name: str, group_remark: str = ""):
+    def __init__(self, settings: Settings):
         from .windows_ui import WindowsUiConfig, WindowsWeComUiSender
+        from .windows_local_db import WindowsWeComLocalDbReceiver
 
         self._sender = WindowsWeComUiSender(
-            WindowsUiConfig(group_name=group_name, group_remark=group_remark)
+            WindowsUiConfig(group_name=settings.target_group_name, group_remark=settings.target_group_remark)
         )
+        self._verifier = WindowsWeComLocalDbReceiver(settings, lambda _message: False)
 
     def is_ready(self) -> bool:
         return self._sender.is_ready()
 
     def send_text(self, room_id: str, content: str) -> None:
         self._sender.prepare_text(room_id, content)
+        started_at = datetime.now(timezone.utc)
         self._sender.confirm_and_send(room_id, content, confirmed=True)
+        if not self._verifier.wait_for_message(content, started_at):
+            raise DeliveryUnconfirmed(
+                "已执行发送，但未在目标群本地消息库中确认；任务不会自动重试，请人工核对"
+            )
 
 
 def build_sender(settings: Settings) -> WeComAccountSender:
@@ -61,7 +73,7 @@ def build_sender(settings: Settings) -> WeComAccountSender:
         return DisabledSender()
     if not settings.target_group_name:
         return DisabledSender()
-    return WindowsScheduledSender(settings.target_group_name, settings.target_group_remark)
+    return WindowsScheduledSender(settings)
 
 
 def build_manual_sender(settings: Settings) -> WeComAccountSender:
@@ -70,4 +82,4 @@ def build_manual_sender(settings: Settings) -> WeComAccountSender:
         return DryRunSender()
     if not settings.target_group_name:
         return DisabledSender()
-    return WindowsScheduledSender(settings.target_group_name, settings.target_group_remark)
+    return WindowsScheduledSender(settings)
