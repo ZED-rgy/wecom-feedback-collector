@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterator
 
@@ -243,8 +243,16 @@ class Database:
             return [dict(row) for row in rows]
 
     def claim_due_jobs(self, limit: int = 10) -> list[SendJob]:
-        now = datetime.now(timezone.utc).isoformat()
+        now_dt = datetime.now(timezone.utc)
+        now = now_dt.isoformat()
+        stale_before = (now_dt - timedelta(minutes=5)).isoformat()
         with self.connect() as conn:
+            conn.execute(
+                "UPDATE send_jobs SET status='pending', claimed_at=NULL, "
+                "last_error='程序中断，任务已自动恢复' "
+                "WHERE status='claimed' AND claimed_at <= ?",
+                (stale_before,),
+            )
             rows = conn.execute(
                 "SELECT * FROM send_jobs WHERE status = 'pending' AND scheduled_at <= ? "
                 "ORDER BY scheduled_at LIMIT ?",
@@ -274,7 +282,15 @@ class Database:
             if success:
                 conn.execute("UPDATE send_jobs SET status='sent', last_error='' WHERE job_id=?", (job_id,))
             else:
+                retry_delay = min(30, 2 ** min(5, self._job_retry_count(conn, job_id)))
+                next_attempt = (datetime.now(timezone.utc) + timedelta(minutes=retry_delay)).isoformat()
                 conn.execute(
-                    "UPDATE send_jobs SET status='pending', retry_count=retry_count+1, last_error=? WHERE job_id=?",
-                    (error, job_id),
+                    "UPDATE send_jobs SET status='pending', retry_count=retry_count+1, "
+                    "last_error=?, scheduled_at=?, claimed_at=NULL WHERE job_id=?",
+                    (error, next_attempt, job_id),
                 )
+
+    @staticmethod
+    def _job_retry_count(conn: sqlite3.Connection, job_id: str) -> int:
+        row = conn.execute("SELECT retry_count FROM send_jobs WHERE job_id=?", (job_id,)).fetchone()
+        return int(row["retry_count"]) if row else 0

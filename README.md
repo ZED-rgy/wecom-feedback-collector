@@ -23,6 +23,7 @@ python -m wecom_feedback diagnose-local
 python -m wecom_feedback run-local --once
 python -m wecom_feedback run-local
 python -m wecom_feedback run-ui
+python -m wecom_feedback desktop
 ```
 
 浏览器打开 `http://127.0.0.1:8765` 即可进入本机配置控制台。控制台可以保存 `.env`、查看健康状态、查看反馈/发送任务，并运行 dry-run 演示。首次接入真实企微前建议保持 dry-run 开启。
@@ -32,6 +33,20 @@ python -m wecom_feedback run-ui
 `run-ui` 是 OCR/UI 兼容入口。它需要打开目标群并保持窗口可见，仅在本地数据库读取暂不支持某个企微版本时使用。
 
 Windows 桌面发送第一阶段使用 [windows_ui.py](wecom_feedback/adapters/windows_ui.py)：先定位窗口、搜索目标群并填入文本，默认不会点击发送；必须经过人工视觉确认后显式调用 `confirm_and_send`。安装桌面依赖：`python -m pip install -e ".[windows]"`。
+
+## 桌面常驻运行
+
+运行 `python -m pip install -e ".[windows,desktop]"` 后执行 `python -m wecom_feedback desktop`。程序会驻留 Windows 系统托盘，同时启动本地配置页、消息接收器和摘要调度器；关闭浏览器不会停止程序。托盘菜单可重新打开控制台或安全退出。
+
+配置页可启用“登录 Windows 后自动启动”。该功能写入当前用户的 `HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run`，不需要管理员权限，也可随时取消。自动发送默认关闭；只有同时关闭 dry-run 并显式开启自动发送后，计划任务才会通过已登录的企微账号发送。
+
+构建独立 EXE：
+
+```powershell
+.\\build_windows.ps1
+```
+
+脚本会把产物复制为项目根目录下的 `WeComFeedbackCollector.exe`，这样它可以直接使用同目录的 `.env` 和 `data`。桌面程序可以全天后台采集，但企微账号发送仍依赖交互式桌面：Windows 必须已登录且未锁屏；企微可以最小化，发送时程序会短暂恢复并切换到目标群。
 
 本地数据库接收不需要 Corp ID、Secret 或私钥；只需要保持当前企微账号登录。
 

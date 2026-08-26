@@ -27,6 +27,10 @@ def build_parser() -> argparse.ArgumentParser:
     web = subparsers.add_parser("web", help="start the local configuration dashboard")
     web.add_argument("--host", default="127.0.0.1")
     web.add_argument("--port", type=int, default=8765)
+    desktop = subparsers.add_parser("desktop", help="run as a Windows tray application")
+    desktop.add_argument("--host", default="127.0.0.1")
+    desktop.add_argument("--port", type=int, default=8765)
+    desktop.add_argument("--no-browser", action="store_true", help="do not open the dashboard at startup")
     run = subparsers.add_parser("run", help="run the long-lived collector loop")
     run.add_argument("--once", action="store_true", help="execute one cycle and exit")
     run.add_argument("--poll-interval", type=int, default=None)
@@ -86,6 +90,11 @@ def main(argv: list[str] | None = None) -> None:
         from .webapp import run_dashboard
 
         run_dashboard(args.host, args.port)
+        return
+    if args.command == "desktop":
+        from .desktop import run_desktop
+
+        run_desktop(args.host, args.port, open_browser=not args.no_browser)
         return
     if args.command == "run":
         from .adapters.archive import NotConfiguredArchive

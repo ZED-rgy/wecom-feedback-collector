@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Protocol, Sequence
 
 from ..models import FeedbackItem
+from ..services.summary import render_feedback_summary
 from .smart_table import CliSmartTableBot
 
 if TYPE_CHECKING:
@@ -22,12 +23,7 @@ class DryRunBot:
         return None
 
     def render_summary(self, items: Sequence[FeedbackItem]) -> str:
-        if not items:
-            return "本时段暂无新的需求或问题。"
-        lines = ["【客户群需求/问题摘要】"]
-        for index, item in enumerate(items, start=1):
-            lines.append(f"{index}. [{item.priority}] {item.title}（{item.status}）")
-        return "\n".join(lines)
+        return render_feedback_summary(items)
 
 
 def build_bot(settings: "Settings") -> WeComBotAdapter:

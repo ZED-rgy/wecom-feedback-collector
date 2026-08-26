@@ -770,7 +770,7 @@ class WindowsWeComLocalDbReceiver:
                     message_id=f"local-{stable_id}",
                     seq=int(row["sequence"] or row["message_id"] or index),
                     account_id=sender_id,
-                    room_id=conversation_id,
+                    room_id=self.settings.target_room_id or self.settings.target_group_name,
                     group_name=self.settings.target_group_name,
                     group_remark=self.settings.target_group_remark,
                     sender_id=sender_id,
@@ -782,6 +782,7 @@ class WindowsWeComLocalDbReceiver:
                     created_at=timestamp,
                     payload={
                         "source": "windows_local_db",
+                        "local_conversation_id": conversation_id,
                         "content_type": content_type,
                         "context": context,
                     },

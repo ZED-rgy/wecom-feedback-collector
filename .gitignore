@@ -8,3 +8,6 @@ logs/
 *.db
 *.sqlite3
 *.egg-info/
+build/
+dist/
+WeComFeedbackCollector.exe

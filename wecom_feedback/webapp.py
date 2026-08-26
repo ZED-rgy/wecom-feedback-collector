@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import threading
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -8,7 +9,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from .adapters.bot import DryRunBot, build_bot
-from .adapters.sender import DryRunSender
+from .adapters.sender import DryRunSender, build_sender
 from .config import Settings, save_env
 from .db import Database
 from .models import RawMessage
@@ -16,6 +17,7 @@ from .services.workflow import WorkflowService
 
 
 WEB_ROOT = Path(__file__).resolve().parent.parent / "web"
+logger = logging.getLogger("wecom_feedback.webapp")
 
 
 class LocalReceiverController:
@@ -96,6 +98,81 @@ class LocalReceiverController:
 LOCAL_RECEIVER = LocalReceiverController()
 
 
+class SummarySchedulerController:
+    """Schedule summaries and dispatch pending jobs in the dashboard process."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._last_error = ""
+        self._last_cycle_at = ""
+        self._last_result: dict[str, object] = {}
+
+    def status(self) -> dict[str, object]:
+        with self._lock:
+            return {
+                "running": bool(self._thread and self._thread.is_alive()),
+                "last_error": self._last_error,
+                "last_cycle_at": self._last_cycle_at,
+                "last_result": self._last_result,
+            }
+
+    def start(self) -> dict[str, object]:
+        with self._lock:
+            if self._thread and self._thread.is_alive():
+                return self._status_unlocked()
+            self._stop.clear()
+            self._last_error = ""
+            self._thread = threading.Thread(target=self._run, name="wecom-summary-scheduler", daemon=True)
+            self._thread.start()
+            return self._status_unlocked()
+
+    def stop(self) -> dict[str, object]:
+        self._stop.set()
+        with self._lock:
+            return self._status_unlocked()
+
+    def _status_unlocked(self) -> dict[str, object]:
+        return {
+            "running": bool(self._thread and self._thread.is_alive()),
+            "last_error": self._last_error,
+            "last_cycle_at": self._last_cycle_at,
+            "last_result": self._last_result,
+        }
+
+    def _run(self) -> None:
+        from .adapters.archive import NotConfiguredArchive
+        from .runtime import CollectorRuntime
+
+        while not self._stop.is_set():
+            settings = Settings.from_env()
+            try:
+                database = Database(settings.database_path)
+                database.init_schema()
+                runtime = CollectorRuntime(
+                    settings,
+                    database,
+                    NotConfiguredArchive(),
+                    build_bot(settings),
+                    build_sender(settings),
+                )
+                result = runtime.run_once()
+                error = ""
+            except Exception as exc:
+                result = {}
+                error = str(exc)
+                logger.exception("summary scheduler cycle failed")
+            with self._lock:
+                self._last_result = result
+                self._last_error = error
+                self._last_cycle_at = datetime.now(timezone.utc).isoformat()
+            self._stop.wait(max(2, settings.poll_interval_seconds))
+
+
+SUMMARY_SCHEDULER = SummarySchedulerController()
+
+
 class DashboardHandler(BaseHTTPRequestHandler):
     server_version = "WeComFeedbackDashboard/0.1"
 
@@ -117,7 +194,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
         database = Database(settings.database_path)
         database.init_schema()
         if path == "/api/settings":
-            return self._json(settings.public_dict())
+            from .startup import is_startup_enabled
+
+            public_settings = settings.public_dict()
+            public_settings["start_with_windows"] = is_startup_enabled()
+            return self._json(public_settings)
         if path == "/api/health":
             from .health import check_health
 
@@ -129,6 +210,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
             return self._json(database.list_jobs())
         if path == "/api/local-reader/status":
             return self._json(LOCAL_RECEIVER.status())
+        if path == "/api/runtime/status":
+            return self._json(SUMMARY_SCHEDULER.status())
         if path in {"/", "/index.html"}:
             body = (WEB_ROOT / "index.html").read_bytes()
             self.send_response(200)
@@ -145,6 +228,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
             payload = self._read_json()
             if path == "/api/settings":
                 save_env(payload)
+                if "start_with_windows" in payload:
+                    from .startup import set_startup_enabled
+
+                    set_startup_enabled(bool(payload["start_with_windows"]))
                 if Settings.from_env().local_db_enabled:
                     LOCAL_RECEIVER.restart()
                 else:
@@ -200,15 +287,29 @@ class DashboardHandler(BaseHTTPRequestHandler):
         return None
 
 
-def run_dashboard(host: str = "127.0.0.1", port: int = 8765) -> None:
-    server = ThreadingHTTPServer((host, port), DashboardHandler)
-    print(f"dashboard running at http://{host}:{port}")
+def create_dashboard_server(host: str = "127.0.0.1", port: int = 8765) -> ThreadingHTTPServer:
+    return ThreadingHTTPServer((host, port), DashboardHandler)
+
+
+def start_background_controllers() -> None:
     if Settings.from_env().local_db_enabled:
         LOCAL_RECEIVER.start()
+    SUMMARY_SCHEDULER.start()
+
+
+def stop_background_controllers() -> None:
+    LOCAL_RECEIVER.stop()
+    SUMMARY_SCHEDULER.stop()
+
+
+def run_dashboard(host: str = "127.0.0.1", port: int = 8765) -> None:
+    server = create_dashboard_server(host, port)
+    print(f"dashboard running at http://{host}:{port}")
+    start_background_controllers()
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
-        LOCAL_RECEIVER.stop()
+        stop_background_controllers()
         server.server_close()

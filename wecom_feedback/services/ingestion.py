@@ -39,4 +39,14 @@ def strip_mention(content: str, target_names: tuple[str, ...]) -> str:
     result = content
     for name in target_names:
         result = re.sub(rf"@{re.escape(name)}", "", result, flags=re.IGNORECASE)
+        # The local protobuf payload may expose the mentioned display name a
+        # second time without the @ glyph. Remove it only when it is a leading
+        # mention token, not when the name appears naturally later in the text.
+        result = re.sub(
+            rf"^\s*{re.escape(name)}(?:(?:\s*[:：,，]\s*)|\s+)",
+            "",
+            result,
+            count=1,
+            flags=re.IGNORECASE,
+        )
     return " ".join(result.split())

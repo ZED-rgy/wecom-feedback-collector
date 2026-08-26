@@ -18,6 +18,13 @@ windows = [
   "pywinauto>=0.6.9",
   "rapidocr-onnxruntime>=1.2.3",
 ]
+desktop = [
+  "Pillow>=10.0",
+  "pystray>=0.19.5",
+]
+build = [
+  "pyinstaller>=6.0",
+]
 
 [tool.setuptools]
 packages = ["wecom_feedback", "wecom_feedback.adapters", "wecom_feedback.services"]

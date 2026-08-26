@@ -9,11 +9,12 @@ from wecom_feedback.config import Settings
 from wecom_feedback.db import Database
 from wecom_feedback.models import RawMessage
 from wecom_feedback.services.feedback import FeedbackService
-from wecom_feedback.services.ingestion import IngestionService, mentions_target
+from wecom_feedback.services.ingestion import IngestionService, mentions_target, strip_mention
 from wecom_feedback.services.workflow import WorkflowService
 from wecom_feedback.adapters.bot import DryRunBot
 from wecom_feedback.runtime import CollectorRuntime
 from wecom_feedback.adapters.windows_ui_receiver import WindowsWeComUiReceiver
+from wecom_feedback.models import SendJob
 
 
 class CoreTests(unittest.TestCase):
@@ -44,6 +45,12 @@ class CoreTests(unittest.TestCase):
     def test_mentions_target(self):
         self.assertTrue(mentions_target("请看 @系统反馈助手 这个问题", self.settings.target_account_names))
         self.assertFalse(mentions_target("普通消息", self.settings.target_account_names))
+
+    def test_strip_mention_removes_duplicate_leading_display_name(self):
+        self.assertEqual(
+            strip_mention("@系统反馈助手 系统反馈助手：登录失败", self.settings.target_account_names),
+            "登录失败",
+        )
 
     def test_ingest_is_idempotent_and_creates_feedback(self):
         message = RawMessage(
@@ -131,6 +138,21 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(result["pulled"], 1)
         self.assertEqual(result["processed"], 1)
         self.assertEqual(self.db.get_state("archive_cursor"), "5")
+
+    def test_failed_send_job_is_delayed_before_retry(self):
+        job = SendJob(
+            job_id="retry-1",
+            room_id="room-1",
+            content="摘要",
+            scheduled_at=datetime.now(timezone.utc),
+        )
+        self.db.create_send_job(job)
+        self.assertEqual(len(self.db.claim_due_jobs()), 1)
+        self.db.finish_job(job.job_id, success=False, error="企微暂不可用")
+        self.assertEqual(self.db.claim_due_jobs(), [])
+        stored = self.db.list_jobs()[0]
+        self.assertEqual(stored["status"], "pending")
+        self.assertEqual(stored["retry_count"], 1)
 
     def test_ui_receiver_filters_and_deduplicates_mentions(self):
         received = []

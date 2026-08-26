@@ -24,6 +24,7 @@ class WindowsUiConfig:
     search_point: tuple[int, int] = (270, 40)
     editor_point: tuple[int, int] = (720, 910)
     group_name: str = ""
+    group_remark: str = ""
     settle_seconds: float = 0.8
 
 
@@ -102,6 +103,7 @@ class WindowsWeComUiSender:
             raise WindowsUiError("WeCom window is not visible; unlock and open WeCom first")
         pyautogui = _pyautogui()
         user32 = ctypes.windll.user32
+        user32.ShowWindow(hwnd, 9)  # SW_RESTORE; supports a minimized WeCom window.
         user32.SetForegroundWindow(hwnd)
         time.sleep(self.config.settle_seconds)
         origin_x, origin_y = _window_origin(hwnd)
@@ -109,10 +111,11 @@ class WindowsWeComUiSender:
         editor_x, editor_y = self.config.editor_point
         pyautogui.click(origin_x + search_x, origin_y + search_y)
         pyautogui.hotkey("ctrl", "a")
-        _paste_text(self.config.group_name)
+        _paste_text(self.config.group_remark or self.config.group_name)
         pyautogui.press("enter")
         time.sleep(self.config.settle_seconds)
         pyautogui.click(origin_x + editor_x, origin_y + editor_y)
+        pyautogui.hotkey("ctrl", "a")
         _paste_text(content)
         self._prepared = (room_id, content)
 

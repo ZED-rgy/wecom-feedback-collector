@@ -38,6 +38,8 @@
         <label>轮询间隔（秒）<input name="poll_interval_seconds" type="number" min="2" /></label>
         <label class="check"><input name="dry_run" type="checkbox" />dry-run（不发送真实消息）</label>
         <label class="check full"><input name="local_db_enabled" type="checkbox" />启用 Windows 本地数据库接收（无需企微窗口前台）</label>
+        <label class="check full"><input name="auto_send_enabled" type="checkbox" />允许按计划通过当前企微账号自动发送摘要（发送时会短暂切换企微窗口）</label>
+        <label class="check full"><input name="start_with_windows" type="checkbox" />登录 Windows 后自动启动桌面程序</label>
         <label class="full">参考/目标智能表格链接<input name="smart_table_url" placeholder="粘贴企微智能表格链接" /></label>
         <label>表格机器人接口地址（可选）<input name="table_bot_api_url" placeholder="默认使用企微官方 CLI，可留空" /></label>
         <label>表格机器人 ID<input name="table_bot_id" /></label>
@@ -57,20 +59,21 @@
     function setField(name, value) { const el = document.querySelector(`[name="${name}"]`); if (el) el.type === 'checkbox' ? el.checked = !!value : el.value = value ?? ''; }
     async function refresh() {
       try {
-        const [settings, health, feedback, jobs, local] = await Promise.all([api('/api/settings'), api('/api/health'), api('/api/feedback'), api('/api/jobs'), api('/api/local-reader/status')]);
+        const [settings, health, feedback, jobs, local, runtime] = await Promise.all([api('/api/settings'), api('/api/health'), api('/api/feedback'), api('/api/jobs'), api('/api/local-reader/status'), api('/api/runtime/status')]);
         ['database_path','target_room_id','target_group_name','target_group_remark','target_account_id','target_account_names','context_window_seconds','summary_times','poll_interval_seconds','smart_table_url','table_bot_api_url','table_bot_id'].forEach(k => setField(k, settings[k]));
-        setField('dry_run', settings.dry_run); setField('table_integration_enabled', settings.table_integration_enabled); setField('local_db_enabled', settings.local_db_enabled);
+        setField('dry_run', settings.dry_run); setField('table_integration_enabled', settings.table_integration_enabled); setField('local_db_enabled', settings.local_db_enabled); setField('auto_send_enabled', settings.auto_send_enabled); setField('start_with_windows', settings.start_with_windows);
         $('#status').innerHTML = `<span class="dot ${health.ok ? 'ok':'bad'}"></span>${health.ok ? '配置完整，可运行':'需要补充配置'}`;
         $('#status-note').style.display = health.missing_config.length ? 'block':'none'; $('#status-note').textContent = health.missing_config.length ? '缺少：' + health.missing_config.join('、') : '';
         $('#raw-count').textContent = health.counts.raw_messages; $('#feedback-count').textContent = health.counts.feedback_items; $('#job-count').textContent = health.counts.send_jobs;
         renderLocalStatus(local);
+        if(runtime.last_error) { $('#status-note').style.display='block'; $('#status-note').textContent='后台调度：'+runtime.last_error; }
         renderFeedback(feedback); renderJobs(jobs);
       } catch (e) { $('#status').innerHTML = '<span class="dot bad"></span>控制台请求失败'; $('#status-note').style.display='block'; $('#status-note').textContent=e.message; }
     }
     function renderFeedback(items) { if (!items.length) return $('#feedback-table').innerHTML='<div class="empty">暂无反馈记录</div>'; $('#feedback-table').innerHTML=`<table><thead><tr><th>标题</th><th>类型</th><th>优先级</th><th>状态</th><th>提交人</th></tr></thead><tbody>${items.map(i=>`<tr><td>${esc(i.title)}<br><small>${esc(i.description)}</small></td><td>${esc(i.feedback_type)}</td><td><span class="tag">${esc(i.priority)}</span></td><td>${esc(i.status)}</td><td>${esc(i.submitter)}</td></tr>`).join('')}</tbody></table>`; }
     function renderJobs(items) { if (!items.length) return $('#jobs-table').innerHTML='<div class="empty">暂无发送任务</div>'; $('#jobs-table').innerHTML=`<table><thead><tr><th>任务</th><th>计划时间</th><th>状态</th><th>内容</th></tr></thead><tbody>${items.map(i=>`<tr><td>${esc(i.job_id)}</td><td>${esc(i.scheduled_at)}</td><td>${esc(i.status)}</td><td>${esc(i.content).replace(/\n/g,'<br>')}</td></tr>`).join('')}</tbody></table>`; }
     function renderLocalStatus(local) { const ok=local.running&&!local.last_error; $('#local-status').innerHTML=`<span class="dot ${ok?'ok':local.last_error?'bad':''}"></span>${local.running?'后台接收运行中':'后台接收已停止'}`; $('#local-toggle').textContent=local.running?'停止后台接收':'启动后台接收'; if(local.last_error) $('#local-note').textContent=local.last_error; else if(local.last_poll_at) $('#local-note').textContent=`最近轮询：${local.last_processed} 条，累计 ${local.processed_total} 条`; }
-    async function saveSettings() { const f = new FormData($('#settings-form')); const data = Object.fromEntries(f.entries()); data.archive_enabled=false; data.table_integration_enabled=f.has('table_integration_enabled'); data.local_db_enabled=f.has('local_db_enabled'); data.dry_run=f.has('dry_run'); try { await api('/api/settings',{method:'POST',body:JSON.stringify(data)}); $('#save-note').textContent='已保存'; await refresh(); } catch(e) { $('#save-note').textContent=e.message; } }
+    async function saveSettings() { const f = new FormData($('#settings-form')); const data = Object.fromEntries(f.entries()); data.archive_enabled=false; data.table_integration_enabled=f.has('table_integration_enabled'); data.local_db_enabled=f.has('local_db_enabled'); data.dry_run=f.has('dry_run'); data.auto_send_enabled=f.has('auto_send_enabled'); data.start_with_windows=f.has('start_with_windows'); try { await api('/api/settings',{method:'POST',body:JSON.stringify(data)}); $('#save-note').textContent='已保存'; await refresh(); } catch(e) { $('#save-note').textContent=e.message; } }
     async function diagnoseLocal() { $('#local-note').textContent='正在检测，首次约需数秒…'; try { const d=await api('/api/local-reader/diagnose',{method:'POST',body:'{}'}); $('#local-status').innerHTML=`<span class="dot ${d.ready?'ok':'bad'}"></span>${d.ready?'本地读取可用':'本地读取不可用'}`; $('#local-note').textContent=d.ready?`企微 ${d.client_version}；已找到目标群，共 ${d.message_count} 条消息、${d.mention_count} 条 @ 提及`:d.error; } catch(e) { $('#local-note').textContent=e.message; } }
     async function pollLocal() { $('#local-note').textContent='正在读取并处理…'; try { const d=await api('/api/local-reader/poll',{method:'POST',body:'{}'}); $('#local-note').textContent=`本次处理 ${d.processed} 条 @ 提及`; await refresh(); } catch(e) { $('#local-note').textContent=e.message; } }
     async function toggleLocal() { try { const running=$('#local-toggle').textContent.includes('停止'); await api(running?'/api/local-reader/stop':'/api/local-reader/start',{method:'POST',body:'{}'}); await refresh(); } catch(e) { $('#local-note').textContent=e.message; } }

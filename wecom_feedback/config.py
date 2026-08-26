@@ -56,6 +56,7 @@ class Settings:
     table_bot_id: str = ""
     table_bot_secret: str = ""
     local_db_enabled: bool = False
+    auto_send_enabled: bool = False
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -81,6 +82,7 @@ class Settings:
             table_bot_id=os.getenv("WECOM_TABLE_BOT_ID", "").strip(),
             table_bot_secret=os.getenv("WECOM_TABLE_BOT_SECRET", "").strip(),
             local_db_enabled=_bool_env("WECOM_LOCAL_DB_ENABLED", False),
+            auto_send_enabled=_bool_env("WECOM_AUTO_SEND_ENABLED", False),
         )
 
     def missing_required(self) -> list[str]:
@@ -136,6 +138,7 @@ class Settings:
             "table_bot_id": self.table_bot_id,
             "table_bot_secret_configured": bool(self.table_bot_secret),
             "local_db_enabled": self.local_db_enabled,
+            "auto_send_enabled": self.auto_send_enabled,
         }
 
 
@@ -161,6 +164,7 @@ def save_env(values: dict[str, object], path: Path = ENV_FILE) -> None:
         "WECOM_TABLE_BOT_API_URL": values.get("table_bot_api_url", ""),
         "WECOM_TABLE_BOT_ID": values.get("table_bot_id", ""),
         "WECOM_LOCAL_DB_ENABLED": str(values.get("local_db_enabled", False)).lower(),
+        "WECOM_AUTO_SEND_ENABLED": str(values.get("auto_send_enabled", False)).lower(),
     }
     secret = str(values.get("archive_secret", "")).strip()
     if secret:

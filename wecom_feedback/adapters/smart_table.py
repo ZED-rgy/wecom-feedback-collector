@@ -15,6 +15,7 @@ from typing import Any, Sequence
 
 from ..config import Settings
 from ..models import FeedbackItem
+from ..services.summary import render_feedback_summary
 
 
 class SmartTableError(RuntimeError):
@@ -100,9 +101,4 @@ class CliSmartTableBot:
         )
 
     def render_summary(self, items: Sequence[FeedbackItem]) -> str:
-        if not items:
-            return "本时段暂无新的需求或问题。"
-        lines = ["【客户群需求/问题摘要】"]
-        for index, item in enumerate(items, start=1):
-            lines.append(f"{index}. [{item.priority}] {item.title}（{item.status}）")
-        return "\n".join(lines)
+        return render_feedback_summary(items)
