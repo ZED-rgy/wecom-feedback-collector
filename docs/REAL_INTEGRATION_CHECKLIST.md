@@ -5,13 +5,14 @@
 ## 1. Windows 企微账号接收（当前方案）
 
 - [ ] 这台电脑已登录目标企微员工账号；
-- [ ] 企微桌面端已打开目标群“测试群”，且窗口保持可见；
+- [ ] 企微桌面端保持登录；群窗口不需要前台可见；
 - [ ] 目标群名称和备注已填写，名称尽量唯一；
 - [ ] 目标员工显示名称已填写（当前为“冉光意”）；
-- [ ] 已安装 Windows UI 依赖：`python -m pip install -e ".[windows]"`；
-- [ ] 先运行 `python -m wecom_feedback run-ui --once` 验证能否读取可见文本；
-- [ ] 再运行 `python -m wecom_feedback run-ui` 做持续监听测试；
-- [ ] 接受 UI 监听可能受窗口遮挡、锁屏、客户端升级和远程验证影响。
+- [ ] 已安装 Windows 依赖：`python -m pip install -e ".[windows]"`；
+- [ ] 先运行 `python -m wecom_feedback diagnose-local`，确认进程、密钥、目标群均通过；
+- [ ] 再运行 `python -m wecom_feedback run-local --once` 做一次真实读取；
+- [ ] 最后运行 `python -m wecom_feedback run-local`，或在控制台启用本地数据库接收；
+- [ ] OCR/UI 模式仅作为回退：`python -m wecom_feedback run-ui`。
 
 ## 2. Windows 企微发送账号（必需）
 

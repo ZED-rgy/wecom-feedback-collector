@@ -33,6 +33,12 @@ def build_parser() -> argparse.ArgumentParser:
     ui = subparsers.add_parser("run-ui", help="read @mentions from the currently open WeCom group window")
     ui.add_argument("--poll-interval", type=float, default=2.0)
     ui.add_argument("--once", action="store_true", help="poll once and exit")
+    local = subparsers.add_parser(
+        "run-local", help="read @mentions from the signed-in Windows WeCom local database"
+    )
+    local.add_argument("--poll-interval", type=float, default=None)
+    local.add_argument("--once", action="store_true", help="poll once and exit")
+    subparsers.add_parser("diagnose-local", help="diagnose Windows local database access without exporting messages")
     return parser
 
 
@@ -109,6 +115,17 @@ def main(argv: list[str] | None = None) -> None:
                 print(json.dumps({"accepted": accepted}, ensure_ascii=False))
         else:
             receiver.run_forever()
+    if args.command in {"run-local", "diagnose-local"}:
+        from .adapters.windows_local_db import WindowsWeComLocalDbReceiver
+
+        workflow = WorkflowService(settings, database, build_bot(settings))
+        receiver = WindowsWeComLocalDbReceiver(settings, workflow.process_message)
+        if args.command == "diagnose-local":
+            print(json.dumps(receiver.diagnose().as_dict(), ensure_ascii=False, indent=2))
+        elif args.once:
+            print(json.dumps({"processed": receiver.poll_once()}, ensure_ascii=False, indent=2))
+        else:
+            receiver.run_forever(args.poll_interval)
 
 
 if __name__ == "__main__":
