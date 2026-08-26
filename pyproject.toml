@@ -15,6 +15,7 @@ windows = [
   "Pillow>=10.0",
   "pyperclip>=1.8.2",
   "pywinauto>=0.6.9",
+  "rapidocr-onnxruntime>=1.2.3",
 ]
 
 [tool.setuptools]

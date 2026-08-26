@@ -6,6 +6,7 @@ This adapter reads text exposed by the currently open chat window through
 Windows UI Automation. It does not inject into WeCom or bypass verification.
 """
 
+import ctypes
 import hashlib
 import logging
 import time
@@ -17,6 +18,7 @@ from ..models import RawMessage
 from .windows_ui import WindowsUiError
 
 logger = logging.getLogger("wecom_feedback.windows_ui_receiver")
+_OCR_ENGINE: Any = None
 
 
 @dataclass(frozen=True)
@@ -24,6 +26,8 @@ class WindowsUiReceiverConfig:
     window_title: str = "企业微信"
     poll_seconds: float = 2.0
     max_control_depth: int = 8
+    ocr_enabled: bool = True
+    ocr_min_confidence: float = 0.55
 
 
 def _desktop_window(title: str) -> Any:
@@ -58,6 +62,49 @@ def _visible_texts(window: Any, max_depth: int) -> list[str]:
     return texts
 
 
+def _window_region(window: Any) -> tuple[int, int, int, int]:
+    class Rect(ctypes.Structure):
+        _fields_ = [
+            ("left", ctypes.c_long),
+            ("top", ctypes.c_long),
+            ("right", ctypes.c_long),
+            ("bottom", ctypes.c_long),
+        ]
+
+    rect = Rect()
+    if not ctypes.windll.user32.GetWindowRect(window.handle, ctypes.byref(rect)):
+        raise WindowsUiError("无法读取企微窗口区域")
+    return int(rect.left), int(rect.top), int(rect.right - rect.left), int(rect.bottom - rect.top)
+
+
+def _ocr_texts(window: Any, min_confidence: float) -> list[str]:
+    """OCR the visible WeCom window; loaded lazily because the model is large."""
+    global _OCR_ENGINE
+    try:
+        import numpy as np
+        import pyautogui
+    except ImportError as exc:  # pragma: no cover - Windows-only optional dependency
+        raise WindowsUiError(
+            "OCR接收需要 rapidocr-onnxruntime，请执行: pip install -e \".[windows]\""
+        ) from exc
+    if _OCR_ENGINE is None:
+        try:
+            from rapidocr_onnxruntime import RapidOCR
+        except ImportError as exc:  # pragma: no cover - Windows-only optional dependency
+            raise WindowsUiError(
+                "OCR接收需要 rapidocr-onnxruntime，请执行: pip install -e \".[windows]\""
+            ) from exc
+        _OCR_ENGINE = RapidOCR()
+    left, top, width, height = _window_region(window)
+    screenshot = np.asarray(pyautogui.screenshot(region=(left, top, width, height)))
+    result, _ = _OCR_ENGINE(screenshot)
+    return [
+        str(row[1]).strip()
+        for row in (result or [])
+        if len(row) >= 3 and float(row[2]) >= min_confidence and str(row[1]).strip()
+    ]
+
+
 class WindowsWeComUiReceiver:
     """Poll the currently open target group and emit newly seen @mentions."""
 
@@ -83,6 +130,8 @@ class WindowsWeComUiReceiver:
     def poll_once(self) -> int:
         window = _desktop_window(self.config.window_title)
         texts = _visible_texts(window, self.config.max_control_depth)
+        if self.config.ocr_enabled and not texts:
+            texts = _ocr_texts(window, self.config.ocr_min_confidence)
         target_names = tuple(name.lower() for name in self.settings.target_account_names)
         accepted = 0
         for text in texts:
