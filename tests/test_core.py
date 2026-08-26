@@ -1,6 +1,7 @@
 import os
 import tempfile
 import unittest
+from unittest.mock import patch
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -12,6 +13,7 @@ from wecom_feedback.services.ingestion import IngestionService, mentions_target
 from wecom_feedback.services.workflow import WorkflowService
 from wecom_feedback.adapters.bot import DryRunBot
 from wecom_feedback.runtime import CollectorRuntime
+from wecom_feedback.adapters.windows_ui_receiver import WindowsWeComUiReceiver
 
 
 class CoreTests(unittest.TestCase):
@@ -129,6 +131,17 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(result["pulled"], 1)
         self.assertEqual(result["processed"], 1)
         self.assertEqual(self.db.get_state("archive_cursor"), "5")
+
+    def test_ui_receiver_filters_and_deduplicates_mentions(self):
+        received = []
+        receiver = WindowsWeComUiReceiver(self.settings, received.append)
+        with patch("wecom_feedback.adapters.windows_ui_receiver._desktop_window", return_value=object()), patch(
+            "wecom_feedback.adapters.windows_ui_receiver._visible_texts",
+            return_value=["客户A", "@系统反馈助手 订单页面打不开", "@系统反馈助手 订单页面打不开"],
+        ):
+            self.assertEqual(receiver.poll_once(), 1)
+            self.assertEqual(receiver.poll_once(), 0)
+        self.assertEqual(received[0].group_name, "客户群")
 
 
 if __name__ == "__main__":

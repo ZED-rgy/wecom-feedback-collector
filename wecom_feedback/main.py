@@ -30,6 +30,9 @@ def build_parser() -> argparse.ArgumentParser:
     run = subparsers.add_parser("run", help="run the long-lived collector loop")
     run.add_argument("--once", action="store_true", help="execute one cycle and exit")
     run.add_argument("--poll-interval", type=int, default=None)
+    ui = subparsers.add_parser("run-ui", help="read @mentions from the currently open WeCom group window")
+    ui.add_argument("--poll-interval", type=float, default=2.0)
+    ui.add_argument("--once", action="store_true", help="poll once and exit")
     return parser
 
 
@@ -87,6 +90,19 @@ def main(argv: list[str] | None = None) -> None:
             print(json.dumps(runtime.run_once(), ensure_ascii=False, indent=2))
         else:
             runtime.run_forever(args.poll_interval)
+    if args.command == "run-ui":
+        from .adapters.windows_ui_receiver import WindowsUiReceiverConfig, WindowsWeComUiReceiver
+
+        workflow = WorkflowService(settings, database, DryRunBot())
+        receiver = WindowsWeComUiReceiver(
+            settings,
+            workflow.process_message,
+            WindowsUiReceiverConfig(poll_seconds=args.poll_interval),
+        )
+        if args.once:
+            print(json.dumps({"accepted": receiver.poll_once()}, ensure_ascii=False))
+        else:
+            receiver.run_forever()
 
 
 if __name__ == "__main__":
