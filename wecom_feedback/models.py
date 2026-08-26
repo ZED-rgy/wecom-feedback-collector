@@ -51,6 +51,9 @@ class SendJob:
     room_id: str
     content: str
     scheduled_at: datetime
+    # Snapshot the target at scheduling time so a later group switch cannot
+    # redirect an old job to the new group.
+    target_group_name: str = ""
     status: str = "pending"
     retry_count: int = 0
     last_error: str = ""

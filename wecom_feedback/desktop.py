@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ctypes
 import logging
+from logging.handlers import RotatingFileHandler
 import os
 import threading
 import webbrowser
@@ -51,7 +52,14 @@ def run_desktop(host: str = "127.0.0.1", port: int = 8765, open_browser: bool = 
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
-        handlers=[logging.FileHandler(Path("logs") / "desktop.log", encoding="utf-8")],
+        handlers=[
+            RotatingFileHandler(
+                Path("logs") / "desktop.log",
+                maxBytes=5 * 1024 * 1024,
+                backupCount=5,
+                encoding="utf-8",
+            )
+        ],
     )
     try:
         import pystray

@@ -123,12 +123,41 @@ class CliSmartTableBot:
         return [field for field in fields if isinstance(field, dict)]
 
     def list_records(self) -> list[dict[str, Any]]:
-        response = self._run(
-            ("records", "list"),
-            {"sheet_title": "反馈记录", "type": "records", "key_type": "field_title", "limit": 1000},
-        )
-        records = response.get("records", [])
-        return [record for record in records if isinstance(record, dict)]
+        records: list[dict[str, Any]] = []
+        seen_record_ids: set[str] = set()
+        page_token: str | None = None
+        offset = 0
+        for _ in range(100):
+            payload: dict[str, Any] = {
+                "sheet_title": "反馈记录",
+                "type": "records",
+                "key_type": "field_title",
+                "limit": 1000,
+            }
+            if page_token:
+                payload["page_token"] = page_token
+            elif offset:
+                payload["offset"] = offset
+            response = self._run(("records", "list"), payload)
+            page = response.get("records", [])
+            page_records = [record for record in page if isinstance(record, dict)]
+            def record_key(record: dict[str, Any]) -> str:
+                return str(record.get("record_id", "")) or json.dumps(record, ensure_ascii=False, sort_keys=True)
+
+            new_records = [record for record in page_records if record_key(record) not in seen_record_ids]
+            for record in new_records:
+                seen_record_ids.add(record_key(record))
+            records.extend(new_records)
+            next_token = response.get("next_page_token") or response.get("page_token_next")
+            has_more = bool(response.get("has_more") or next_token)
+            if not has_more or not page_records or not new_records:
+                break
+            if next_token:
+                page_token = str(next_token)
+            else:
+                page_token = None
+                offset += len(page_records)
+        return records
 
     def ensure_reporting_fields(self) -> list[str]:
         """Add the small set of text fields needed for stable reporting."""

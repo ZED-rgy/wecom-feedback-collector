@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+import logging
+from datetime import datetime, timedelta, timezone
 from hashlib import sha1
 
 from ..adapters.bot import WeComBotAdapter
@@ -11,6 +12,9 @@ from ..models import RawMessage, SendJob
 from .feedback import FeedbackService
 from .ingestion import IngestionService
 from .reporting import build_report, mark_report_sent
+
+
+logger = logging.getLogger("wecom_feedback.workflow")
 
 
 class WorkflowService:
@@ -62,11 +66,20 @@ class WorkflowService:
         else:
             rendered_content = str(build_report(self.settings, self.database, self.bot)["content"])
         digest = sha1(f"{room_key}:{scheduled_at.isoformat()}".encode()).hexdigest()[:12]
+        duplicate = self.database.find_active_job(
+            room_key,
+            self.settings.target_group_name,
+            rendered_content,
+            scheduled_at - timedelta(minutes=10),
+        )
+        if duplicate is not None:
+            return duplicate
         job = SendJob(
             job_id=f"SUMMARY-{scheduled_at.strftime('%Y%m%d%H%M')}-{digest}",
             room_id=room_key,
             content=rendered_content,
             scheduled_at=scheduled_at,
+            target_group_name=self.settings.target_group_name,
         )
         self.database.create_send_job(job)
         return job
@@ -81,6 +94,12 @@ class WorkflowService:
 
     def dispatch_claimed_job(self, job: SendJob, sender: WeComAccountSender) -> bool:
         """Dispatch a job already reserved by a background send worker."""
+        expected_room = self.settings.target_room_id or self.settings.target_group_name
+        if job.room_id != expected_room or job.target_group_name != self.settings.target_group_name:
+            reason = "任务所属群已变更，已取消发送"
+            self.database.cancel_claimed_job(job.job_id, reason)
+            logger.warning("skip job %s after target group changed", job.job_id)
+            return False
         if not sender.is_ready():
             self.database.finish_job(job.job_id, success=False, error="企微主窗口未打开，任务已保留")
             return False
@@ -100,7 +119,8 @@ class WorkflowService:
         if not sender.is_ready():
             return 0
         sent = 0
-        for job in self.database.claim_due_jobs(limit):
+        expected_room = self.settings.target_room_id or self.settings.target_group_name
+        for job in self.database.claim_due_jobs(limit, room_id=expected_room, group_name=self.settings.target_group_name):
             try:
                 sender.send_text(job.room_id, job.content)
             except DeliveryUnconfirmed as exc:

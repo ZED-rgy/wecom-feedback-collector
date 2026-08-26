@@ -4,6 +4,7 @@ import os
 import base64
 from dataclasses import dataclass
 from pathlib import Path
+from string import Formatter
 
 
 ENV_FILE = Path(".env")
@@ -22,6 +23,91 @@ DEFAULT_SUMMARY_TEMPLATE = """【{group_name}反馈进展｜{report_time}】
 {focus_items}
 
 详细进度请查看智能表格。"""
+
+
+class ConfigValidationError(ValueError):
+    """Raised when dashboard input cannot be safely persisted."""
+
+
+def _int_env(name: str, default: int, minimum: int, maximum: int) -> int:
+    try:
+        value = int(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+    return max(minimum, min(maximum, value))
+
+
+def _validate_clock(value: object, field: str) -> str:
+    text = str(value or "").strip()
+    parts = text.split(":")
+    if len(parts) != 2:
+        raise ConfigValidationError(f"{field} 必须是 HH:MM 格式")
+    try:
+        hour, minute = int(parts[0]), int(parts[1])
+    except ValueError as exc:
+        raise ConfigValidationError(f"{field} 必须是 HH:MM 格式") from exc
+    if not (0 <= hour <= 23 and 0 <= minute <= 59):
+        raise ConfigValidationError(f"{field} 必须是 HH:MM 格式")
+    return f"{hour:02d}:{minute:02d}"
+
+
+def validate_config_values(values: dict[str, object]) -> None:
+    text_limits = {
+        "target_group_name": 128,
+        "target_group_remark": 256,
+        "target_account_names": 256,
+        "target_room_id": 256,
+        "target_account_id": 256,
+        "database_path": 1024,
+        "smart_table_url": 2048,
+        "table_bot_api_url": 2048,
+        "table_bot_id": 256,
+    }
+    for field, limit in text_limits.items():
+        value = str(values.get(field, "") or "")
+        if "\n" in value or "\r" in value:
+            raise ConfigValidationError(f"{field} 不能包含换行")
+        if len(value) > limit:
+            raise ConfigValidationError(f"{field} 长度不能超过 {limit} 个字符")
+    if not str(values.get("target_group_name", "") or "").strip():
+        raise ConfigValidationError("目标群名称不能为空")
+    try:
+        context_window = int(values.get("context_window_seconds", 90))
+        poll_interval = int(values.get("poll_interval_seconds", 10))
+        interval_hours = int(values.get("summary_interval_hours", 2))
+        detail_limit = int(values.get("summary_detail_limit", 5))
+    except (TypeError, ValueError) as exc:
+        raise ConfigValidationError("上下文、轮询间隔、摘要间隔和展示条数必须是整数") from exc
+    if not 10 <= context_window <= 86400:
+        raise ConfigValidationError("上下文窗口必须在 10～86400 秒之间")
+    if not 2 <= poll_interval <= 3600:
+        raise ConfigValidationError("消息检查间隔必须在 2～3600 秒之间")
+    if not 1 <= interval_hours <= 24:
+        raise ConfigValidationError("摘要间隔必须在 1～24 小时之间")
+    if not 1 <= detail_limit <= 20:
+        raise ConfigValidationError("每段展示任务数必须在 1～20 之间")
+    mode = str(values.get("summary_schedule_mode", "interval") or "interval")
+    if mode not in {"interval", "fixed"}:
+        raise ConfigValidationError("摘要计划方式无效")
+    _validate_clock(values.get("summary_active_start", "08:00"), "每日生效开始时间")
+    _validate_clock(values.get("summary_active_end", "22:00"), "每日生效结束时间")
+    for value in str(values.get("summary_times", "") or "").split(","):
+        if value.strip():
+            _validate_clock(value, "固定发送时间")
+    template = str(values.get("summary_template", DEFAULT_SUMMARY_TEMPLATE) or "")
+    if len(template) > 20000:
+        raise ConfigValidationError("摘要模板不能超过 20000 个字符")
+    allowed = {
+        "group_name", "report_time", "today_new", "pending_confirmation", "in_progress",
+        "completed_today", "total", "interval_hours", "recent_items", "focus_items",
+    }
+    try:
+        fields = {name for _, name, _, _ in Formatter().parse(template) if name}
+    except ValueError as exc:
+        raise ConfigValidationError("摘要模板包含未闭合的大括号") from exc
+    unknown = sorted(fields - allowed)
+    if unknown:
+        raise ConfigValidationError(f"摘要模板包含不支持的变量：{', '.join(unknown)}")
 
 
 def load_dotenv(path: Path = ENV_FILE) -> None:
@@ -104,9 +190,9 @@ class Settings:
             target_group_remark=os.getenv("WECOM_TARGET_GROUP_REMARK", "").strip(),
             target_account_id=os.getenv("WECOM_TARGET_ACCOUNT_ID", "").strip(),
             target_account_names=_csv_env("WECOM_TARGET_ACCOUNT_NAMES"),
-            context_window_seconds=int(os.getenv("WECOM_CONTEXT_WINDOW_SECONDS", "90")),
+            context_window_seconds=_int_env("WECOM_CONTEXT_WINDOW_SECONDS", 90, 10, 86400),
             summary_times=_csv_env("WECOM_SUMMARY_TIMES") or ("12:00", "18:00"),
-            poll_interval_seconds=int(os.getenv("WECOM_POLL_INTERVAL_SECONDS", "10")),
+            poll_interval_seconds=_int_env("WECOM_POLL_INTERVAL_SECONDS", 10, 2, 3600),
             dry_run=_bool_env("WECOM_DRY_RUN", True),
             table_integration_enabled=_bool_env("WECOM_TABLE_INTEGRATION_ENABLED", False),
             smart_table_url=os.getenv("WECOM_SMART_TABLE_URL", "").strip(),
@@ -116,11 +202,11 @@ class Settings:
             local_db_enabled=_bool_env("WECOM_LOCAL_DB_ENABLED", False),
             auto_send_enabled=_bool_env("WECOM_AUTO_SEND_ENABLED", False),
             summary_schedule_mode=os.getenv("WECOM_SUMMARY_SCHEDULE_MODE", "interval").strip() or "interval",
-            summary_interval_hours=max(1, int(os.getenv("WECOM_SUMMARY_INTERVAL_HOURS", "2"))),
+            summary_interval_hours=_int_env("WECOM_SUMMARY_INTERVAL_HOURS", 2, 1, 24),
             summary_active_start=os.getenv("WECOM_SUMMARY_ACTIVE_START", "08:00").strip() or "08:00",
             summary_active_end=os.getenv("WECOM_SUMMARY_ACTIVE_END", "22:00").strip() or "22:00",
             summary_template=_template_env(),
-            summary_detail_limit=max(1, int(os.getenv("WECOM_SUMMARY_DETAIL_LIMIT", "5"))),
+            summary_detail_limit=_int_env("WECOM_SUMMARY_DETAIL_LIMIT", 5, 1, 20),
         )
 
     def missing_required(self) -> list[str]:
@@ -189,6 +275,7 @@ class Settings:
 def save_env(values: dict[str, object], path: Path = ENV_FILE) -> None:
     """Persist dashboard-editable values; blank secrets leave existing secrets unchanged."""
     load_dotenv(path)
+    validate_config_values(values)
     mapping = {
         "WECOM_DATABASE_PATH": values.get("database_path", "data/feedback.db"),
         "WECOM_ARCHIVE_ENABLED": str(values.get("archive_enabled", False)).lower(),
@@ -230,6 +317,8 @@ def save_env(values: dict[str, object], path: Path = ENV_FILE) -> None:
         mapping["WECOM_TABLE_BOT_SECRET"] = os.environ["WECOM_TABLE_BOT_SECRET"]
     lines = ["# Managed by the local WeCom feedback dashboard", ""]
     lines.extend(f"{key}={str(value).strip()}" for key, value in mapping.items())
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    temporary = path.with_name(f".{path.name}.tmp")
+    temporary.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    temporary.replace(path)
     for key, value in mapping.items():
         os.environ[key] = str(value)

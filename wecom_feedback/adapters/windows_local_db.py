@@ -13,6 +13,7 @@ privacy and lifecycle requirements.
 """
 
 import ctypes
+from bisect import bisect_left, bisect_right
 import hashlib
 import logging
 import os
@@ -20,6 +21,7 @@ import re
 import sqlite3
 import struct
 import time
+from collections import deque
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -641,6 +643,8 @@ class WindowsWeComLocalDbReceiver:
         self._client_version = ""
         self._stop = False
         self._seen_message_ids: set[str] = set()
+        self._seen_order: deque[str] = deque()
+        self._last_sequence = 0
 
     def _ensure_key(self) -> tuple[Path, bytes]:
         directories = _discover_data_directories()
@@ -738,37 +742,48 @@ class WindowsWeComLocalDbReceiver:
         return conversation_id, rows, names
 
     def _raw_messages(
-        self, conversation_id: str, rows: list[sqlite3.Row], names: dict[str, str]
+        self,
+        conversation_id: str,
+        rows: list[sqlite3.Row],
+        names: dict[str, str],
+        after_sequence: int = 0,
     ) -> list[RawMessage]:
         decoded = [decode_message_text(row["content"]) for row in rows]
+        timestamps = [_message_datetime(row["send_time"]) for row in rows]
+        timestamp_values = [value.timestamp() for value in timestamps]
         output: list[RawMessage] = []
         window = max(0, self.settings.context_window_seconds)
         for index, (row, content) in enumerate(zip(rows, decoded)):
+            sequence = int(row["sequence"] or row["message_id"] or index)
+            if after_sequence and sequence <= after_sequence:
+                continue
             if not content or not mentions_target(content, self.settings.target_account_names):
                 continue
-            timestamp = _message_datetime(row["send_time"])
+            timestamp = timestamps[index]
+            low = bisect_left(timestamp_values, timestamp.timestamp() - window)
+            high = bisect_right(timestamp_values, timestamp.timestamp() + window)
             context: list[dict[str, object]] = []
-            for nearby_row, nearby_content in zip(rows, decoded):
+            for nearby_row, nearby_content, nearby_time in zip(
+                rows[low:high], decoded[low:high], timestamps[low:high]
+            ):
                 if not nearby_content:
                     continue
-                nearby_time = _message_datetime(nearby_row["send_time"])
-                if abs((nearby_time - timestamp).total_seconds()) <= window:
-                    nearby_sender = str(nearby_row["sender_id"])
-                    context.append(
-                        {
-                            "message_id": str(nearby_row["message_id"]),
-                            "sender": names.get(nearby_sender, nearby_sender),
-                            "created_at": nearby_time.isoformat(),
-                            "content": nearby_content,
-                        }
-                    )
+                nearby_sender = str(nearby_row["sender_id"])
+                context.append(
+                    {
+                        "message_id": str(nearby_row["message_id"]),
+                        "sender": names.get(nearby_sender, nearby_sender),
+                        "created_at": nearby_time.isoformat(),
+                        "content": nearby_content,
+                    }
+                )
             sender_id = str(row["sender_id"])
             stable_id = row["server_id"] or row["message_id"]
             content_type = int(row["content_type"] or 0)
             output.append(
                 RawMessage(
                     message_id=f"local-{stable_id}",
-                    seq=int(row["sequence"] or row["message_id"] or index),
+                    seq=sequence,
                     account_id=sender_id,
                     room_id=self.settings.target_room_id or self.settings.target_group_name,
                     group_name=self.settings.target_group_name,
@@ -795,12 +810,22 @@ class WindowsWeComLocalDbReceiver:
         connections = self._open_snapshots()
         try:
             conversation_id, rows, names = self._target_rows(connections)
-            for message in self._raw_messages(conversation_id, rows, names):
+            for message in self._raw_messages(
+                conversation_id, rows, names, after_sequence=self._last_sequence
+            ):
                 if message.message_id in self._seen_message_ids:
                     continue
                 if self.on_message(message) is not False:
                     accepted += 1
                 self._seen_message_ids.add(message.message_id)
+                self._seen_order.append(message.message_id)
+                while len(self._seen_order) > 5000:
+                    self._seen_message_ids.discard(self._seen_order.popleft())
+            if rows:
+                self._last_sequence = max(
+                    self._last_sequence,
+                    max(int(row["sequence"] or row["message_id"] or 0) for row in rows),
+                )
         finally:
             for connection in connections.values():
                 connection.close()

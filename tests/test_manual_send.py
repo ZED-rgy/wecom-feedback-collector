@@ -40,6 +40,7 @@ class ManualSendControllerTests(unittest.TestCase):
                 room_id="room-1",
                 content="测试摘要",
                 scheduled_at=datetime.now(timezone.utc),
+                target_group_name="测试群",
             )
             database.create_send_job(job)
             claimed = database.claim_job(job.job_id)

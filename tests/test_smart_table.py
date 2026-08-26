@@ -51,6 +51,26 @@ class SmartTableTests(unittest.TestCase):
         self.assertEqual(payload["records"][0]["record_id"], "row-1")
         self.assertIn("任务编号", payload["records"][0]["values"])
 
+    def test_records_are_read_page_by_page(self):
+        class PagedBot(FakeTableBot):
+            def __init__(self, settings):
+                super().__init__(settings)
+                self.page = 0
+
+            def _run(self, command, payload):
+                self.calls.append((command, payload))
+                if command == ("records", "list"):
+                    self.page += 1
+                    if self.page == 1:
+                        return {"records": [{"record_id": "row-1", "values": {}}], "has_more": True}
+                    return {"records": [{"record_id": "row-2", "values": {}}], "has_more": False}
+                return super()._run(command, payload)
+
+        bot = PagedBot(self.settings)
+        records = bot.list_records()
+        self.assertEqual([record["record_id"] for record in records], ["row-1", "row-2"])
+        self.assertEqual(sum(command == ("records", "list") for command, _ in bot.calls), 2)
+
 
 if __name__ == "__main__":
     unittest.main()

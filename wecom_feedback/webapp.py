@@ -13,7 +13,7 @@ from urllib.parse import urlparse
 
 from .adapters.bot import DryRunBot, build_bot
 from .adapters.sender import DryRunSender, build_sender
-from .config import Settings, save_env
+from .config import ConfigValidationError, Settings, save_env
 from .db import Database
 from .models import RawMessage, SendJob
 from .services.workflow import WorkflowService
@@ -22,6 +22,11 @@ from .services.schedule import next_schedule_at
 
 WEB_ROOT = Path(__file__).resolve().parent.parent / "web"
 logger = logging.getLogger("wecom_feedback.webapp")
+MAX_REQUEST_BYTES = 2 * 1024 * 1024
+
+
+class RequestValidationError(ValueError):
+    pass
 
 
 def _next_summary_at(settings: Settings) -> str:
@@ -44,15 +49,19 @@ def _activity(database: Database, room_key: str, limit: int = 40) -> list[dict[s
         )
     for job in database.list_jobs(limit=limit):
         status = str(job["status"])
+        activity_status = (
+            "error" if status in {"failed", "unconfirmed"}
+            else ("success" if status == "sent" else "pending")
+        )
         events.append(
             {
                 "id": job["job_id"],
                 "kind": "send",
-                "title": {"sent": "摘要已发送", "pending": "摘要等待发送", "cancelled": "摘要任务已取消", "unconfirmed": "摘要发送待人工确认"}.get(
+                "title": {"sent": "摘要已发送", "pending": "摘要等待发送", "cancelled": "摘要任务已取消", "failed": "摘要发送失败", "unconfirmed": "摘要发送待人工确认"}.get(
                     status, "摘要发送任务"
                 ),
                 "detail": job["last_error"] or str(job["content"]).splitlines()[0],
-                "status": "error" if job["last_error"] else ("success" if status == "sent" else "pending"),
+                "status": activity_status,
                 "created_at": job["scheduled_at"],
             }
         )
@@ -75,7 +84,15 @@ def _dashboard_snapshot(settings: Settings, database: Database) -> dict[str, obj
         alerts.append({"level": "error", "title": "群消息接收异常", "detail": str(local["last_error"])})
     if runtime["last_error"]:
         alerts.append({"level": "error", "title": "摘要调度异常", "detail": str(runtime["last_error"])})
-    failed_jobs = [job for job in jobs if job["last_error"]]
+    current_jobs = [
+        job for job in jobs
+        if job.get("room_id") == room_key
+        and job.get("target_group_name") == settings.target_group_name
+    ]
+    failed_jobs = [
+        job for job in current_jobs
+        if job["last_error"] and job["status"] not in {"sent", "cancelled"}
+    ]
     if failed_jobs:
         alerts.append({"level": "warning", "title": "存在发送失败任务", "detail": failed_jobs[0]["last_error"]})
     pipeline = [
@@ -92,7 +109,7 @@ def _dashboard_snapshot(settings: Settings, database: Database) -> dict[str, obj
         "total_feedback": len(feedback),
         "pending_review": status_counts.get("待确认", 0),
         "pending_sync": sync["pending"],
-        "pending_jobs": sum(1 for job in jobs if job["status"] == "pending"),
+        "pending_jobs": sum(1 for job in current_jobs if job["status"] in {"pending", "claimed"}),
         "next_summary_at": _next_summary_at(settings),
         "auto_send_enabled": settings.auto_send_enabled,
         "local_reader": local,
@@ -117,6 +134,7 @@ class LocalReceiverController:
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
+        self._desired = False
         self._last_error = ""
         self._last_poll_at = ""
         self._last_processed = 0
@@ -134,6 +152,7 @@ class LocalReceiverController:
 
     def start(self) -> dict[str, object]:
         with self._lock:
+            self._desired = True
             if self._thread and self._thread.is_alive():
                 return self.status_unlocked()
             self._stop.clear()
@@ -154,7 +173,12 @@ class LocalReceiverController:
     def stop(self) -> dict[str, object]:
         self._stop.set()
         with self._lock:
+            self._desired = False
             return self.status_unlocked()
+
+    def desired(self) -> bool:
+        with self._lock:
+            return self._desired
 
     def restart(self) -> dict[str, object]:
         self._stop.set()
@@ -197,6 +221,7 @@ class SummarySchedulerController:
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
+        self._desired = False
         self._last_error = ""
         self._last_cycle_at = ""
         self._last_result: dict[str, object] = {}
@@ -212,6 +237,7 @@ class SummarySchedulerController:
 
     def start(self) -> dict[str, object]:
         with self._lock:
+            self._desired = True
             if self._thread and self._thread.is_alive():
                 return self._status_unlocked()
             self._stop.clear()
@@ -223,7 +249,12 @@ class SummarySchedulerController:
     def stop(self) -> dict[str, object]:
         self._stop.set()
         with self._lock:
+            self._desired = False
             return self._status_unlocked()
+
+    def desired(self) -> bool:
+        with self._lock:
+            return self._desired
 
     def _status_unlocked(self) -> dict[str, object]:
         return {
@@ -263,6 +294,40 @@ class SummarySchedulerController:
 
 
 SUMMARY_SCHEDULER = SummarySchedulerController()
+
+
+class BackgroundWatchdog:
+    """Restart a controller thread if an unexpected exception kills it."""
+
+    def __init__(self) -> None:
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        if self._thread and self._thread.is_alive():
+            return
+        self._stop.clear()
+        self._thread = threading.Thread(target=self._run, name="wecom-background-watchdog", daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        thread = self._thread
+        if thread and thread.is_alive():
+            thread.join(timeout=3)
+
+    def _run(self) -> None:
+        while not self._stop.wait(10):
+            try:
+                if LOCAL_RECEIVER.desired() and not LOCAL_RECEIVER.status()["running"]:
+                    LOCAL_RECEIVER.start()
+                if SUMMARY_SCHEDULER.desired() and not SUMMARY_SCHEDULER.status()["running"]:
+                    SUMMARY_SCHEDULER.start()
+            except Exception:
+                logger.exception("background controller watchdog failed")
+
+
+BACKGROUND_WATCHDOG = BackgroundWatchdog()
 
 
 class ManualSendController:
@@ -350,8 +415,21 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _read_json(self) -> dict[str, object]:
-        length = int(self.headers.get("Content-Length", "0"))
-        return json.loads(self.rfile.read(length).decode("utf-8")) if length else {}
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except ValueError as exc:
+            raise RequestValidationError("请求长度无效") from exc
+        if length < 0 or length > MAX_REQUEST_BYTES:
+            raise RequestValidationError("请求内容过大")
+        if not length:
+            return {}
+        try:
+            payload = json.loads(self.rfile.read(length).decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise RequestValidationError("请求 JSON 格式无效") from exc
+        if not isinstance(payload, dict):
+            raise RequestValidationError("请求主体必须是 JSON 对象")
+        return payload
 
     def do_GET(self) -> None:  # noqa: N802
         path = urlparse(self.path).path
@@ -428,7 +506,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
         try:
             payload = self._read_json()
             if path == "/api/settings":
-                save_env(payload)
+                try:
+                    save_env(payload)
+                except ConfigValidationError as exc:
+                    return self._json({"error": str(exc)}, 400)
                 if "start_with_windows" in payload:
                     from .startup import set_startup_enabled
 
@@ -461,6 +542,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 if not diagnostic.get("ready"):
                     return self._json({"error": diagnostic.get("error") or "未在本机企微中找到该群", "diagnostic": diagnostic}, 400)
                 old_group = settings.target_group_name
+                old_room = settings.target_room_id or old_group
+                cancelled_jobs = database.cancel_jobs_for_target(
+                    old_room,
+                    old_group,
+                    "监听群已切换，旧群发送任务已取消",
+                )
                 values = settings.public_dict()
                 values.update(
                     {
@@ -479,6 +566,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                         "switched": True,
                         "old_group": old_group,
                         "new_group": group_name,
+                        "cancelled_jobs": cancelled_jobs,
                         "diagnostic": diagnostic,
                     }
                 )
@@ -551,7 +639,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
             if path == "/api/jobs/cancel":
                 return self._json({"cancelled": database.cancel_job(str(payload.get("job_id", "")))})
             if path == "/api/jobs/retry":
-                return self._json({"retried": database.retry_job(str(payload.get("job_id", "")))})
+                job_id = str(payload.get("job_id", ""))
+                job = database.get_job(job_id)
+                expected_room = settings.target_room_id or settings.target_group_name
+                if job and (job.room_id != expected_room or job.target_group_name != settings.target_group_name):
+                    return self._json({"error": "任务所属群已变化，请重新生成当前群摘要"}, 409)
+                return self._json({"retried": database.retry_job(job_id)})
             if path == "/api/demo-ingest":
                 content = str(payload.get("content", "")).strip()
                 if not content:
@@ -576,6 +669,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 sent = workflow.dispatch_due_jobs(DryRunSender())
                 return self._json({"job_id": job.job_id, "sent": sent})
             self._json({"error": "not found"}, 404)
+        except (RequestValidationError, ConfigValidationError) as exc:
+            self._json({"error": str(exc)}, 400)
         except Exception as exc:
             self._json({"error": str(exc)}, 500)
 
@@ -583,8 +678,13 @@ class DashboardHandler(BaseHTTPRequestHandler):
         return None
 
 
+class DashboardServer(ThreadingHTTPServer):
+    daemon_threads = True
+    allow_reuse_address = True
+
+
 def create_dashboard_server(host: str = "127.0.0.1", port: int = 8765) -> ThreadingHTTPServer:
-    return ThreadingHTTPServer((host, port), DashboardHandler)
+    return DashboardServer((host, port), DashboardHandler)
 
 
 def start_background_controllers() -> None:
@@ -592,9 +692,11 @@ def start_background_controllers() -> None:
         LOCAL_RECEIVER.start()
     SUMMARY_SCHEDULER.start()
     MANUAL_SEND_QUEUE.start()
+    BACKGROUND_WATCHDOG.start()
 
 
 def stop_background_controllers() -> None:
+    BACKGROUND_WATCHDOG.stop()
     LOCAL_RECEIVER.stop()
     SUMMARY_SCHEDULER.stop()
     MANUAL_SEND_QUEUE.stop()

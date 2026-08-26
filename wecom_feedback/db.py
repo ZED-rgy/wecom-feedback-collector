@@ -10,6 +10,9 @@ from typing import Iterator
 from .models import FeedbackItem, RawMessage, SendJob
 
 
+MAX_AUTOMATIC_RETRIES = 3
+
+
 class Database:
     def __init__(self, path: Path):
         self.path = path
@@ -70,6 +73,7 @@ class Database:
                 CREATE TABLE IF NOT EXISTS send_jobs (
                     job_id TEXT PRIMARY KEY,
                     room_id TEXT NOT NULL,
+                    target_group_name TEXT NOT NULL DEFAULT '',
                     content TEXT NOT NULL,
                     scheduled_at TEXT NOT NULL,
                     status TEXT NOT NULL,
@@ -80,6 +84,18 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_send_jobs_due
                     ON send_jobs(status, scheduled_at);
                 """
+            )
+            columns = {str(row["name"]) for row in conn.execute("PRAGMA table_info(send_jobs)")}
+            if "target_group_name" not in columns:
+                conn.execute(
+                    "ALTER TABLE send_jobs ADD COLUMN target_group_name TEXT NOT NULL DEFAULT ''"
+                )
+            # Jobs created by versions before target snapshots were introduced
+            # cannot be safely routed after a restart or group switch.
+            conn.execute(
+                "UPDATE send_jobs SET status='cancelled', "
+                "last_error='历史任务缺少目标群快照，已取消，请重新生成摘要', claimed_at=NULL "
+                "WHERE status IN ('pending','claimed') AND target_group_name=''"
             )
 
     def get_state(self, key: str, default: str = "") -> str:
@@ -304,11 +320,12 @@ class Database:
         with self.connect() as conn:
             conn.execute(
                 """INSERT OR IGNORE INTO send_jobs
-                (job_id, room_id, content, scheduled_at, status, retry_count, last_error)
-                VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (job_id, room_id, target_group_name, content, scheduled_at, status, retry_count, last_error)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     job.job_id,
                     job.room_id,
+                    job.target_group_name,
                     job.content,
                     job.scheduled_at.isoformat(),
                     job.status,
@@ -327,7 +344,7 @@ class Database:
     def list_jobs(self, limit: int = 100) -> list[dict[str, object]]:
         with self.connect() as conn:
             rows = conn.execute(
-                "SELECT job_id, room_id, content, scheduled_at, status, retry_count, last_error "
+                "SELECT job_id, room_id, target_group_name, content, scheduled_at, status, retry_count, last_error "
                 "FROM send_jobs ORDER BY scheduled_at DESC LIMIT ?",
                 (limit,),
             ).fetchall()
@@ -339,7 +356,7 @@ class Database:
         if row is None:
             return None
         return SendJob(
-            job_id=row["job_id"], room_id=row["room_id"], content=row["content"],
+            job_id=row["job_id"], room_id=row["room_id"], target_group_name=row["target_group_name"], content=row["content"],
             scheduled_at=datetime.fromisoformat(row["scheduled_at"]), status=row["status"],
             retry_count=row["retry_count"], last_error=row["last_error"],
         )
@@ -356,7 +373,7 @@ class Database:
     def retry_job(self, job_id: str) -> bool:
         with self.connect() as conn:
             cursor = conn.execute(
-                "UPDATE send_jobs SET status='pending', scheduled_at=?, last_error='', claimed_at=NULL "
+                "UPDATE send_jobs SET status='pending', retry_count=0, scheduled_at=?, last_error='', claimed_at=NULL "
                 "WHERE job_id=? AND status IN ('pending','failed','cancelled','unconfirmed')",
                 (datetime.now(timezone.utc).isoformat(), job_id),
             )
@@ -368,6 +385,43 @@ class Database:
                 "UPDATE send_jobs SET status='unconfirmed', last_error=?, claimed_at=NULL WHERE job_id=?",
                 (error, job_id),
             )
+
+    def cancel_claimed_job(self, job_id: str, reason: str) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                "UPDATE send_jobs SET status='cancelled', last_error=?, claimed_at=NULL "
+                "WHERE job_id=? AND status='claimed'",
+                (reason, job_id),
+            )
+
+    def cancel_jobs_for_target(self, room_id: str, group_name: str, reason: str) -> int:
+        """Cancel queued work before switching the monitored group."""
+        with self.connect() as conn:
+            cursor = conn.execute(
+                "UPDATE send_jobs SET status='cancelled', last_error=?, claimed_at=NULL "
+                "WHERE status IN ('pending','claimed') AND "
+                "(room_id=? OR target_group_name=? OR target_group_name='')",
+                (reason, room_id, group_name),
+            )
+            return int(cursor.rowcount)
+
+    def find_active_job(
+        self, room_id: str, group_name: str, content: str, since: datetime
+    ) -> SendJob | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM send_jobs WHERE room_id=? AND target_group_name=? "
+                "AND content=? AND status IN ('pending','claimed') AND scheduled_at>=? "
+                "ORDER BY scheduled_at DESC LIMIT 1",
+                (room_id, group_name, content, since.isoformat()),
+            ).fetchone()
+        if row is None:
+            return None
+        return SendJob(
+            job_id=row["job_id"], room_id=row["room_id"], target_group_name=row["target_group_name"],
+            content=row["content"], scheduled_at=datetime.fromisoformat(row["scheduled_at"]),
+            status=row["status"], retry_count=row["retry_count"], last_error=row["last_error"],
+        )
 
     def claim_job(self, job_id: str) -> SendJob | None:
         now = datetime.now(timezone.utc).isoformat()
@@ -382,12 +436,14 @@ class Database:
             if cursor.rowcount != 1:
                 return None
         return SendJob(
-            job_id=row["job_id"], room_id=row["room_id"], content=row["content"],
+            job_id=row["job_id"], room_id=row["room_id"], target_group_name=row["target_group_name"], content=row["content"],
             scheduled_at=datetime.fromisoformat(row["scheduled_at"]), status="claimed",
             retry_count=row["retry_count"], last_error=row["last_error"],
         )
 
-    def claim_due_jobs(self, limit: int = 10) -> list[SendJob]:
+    def claim_due_jobs(
+        self, limit: int = 10, room_id: str | None = None, group_name: str | None = None
+    ) -> list[SendJob]:
         now_dt = datetime.now(timezone.utc)
         now = now_dt.isoformat()
         stale_before = (now_dt - timedelta(minutes=5)).isoformat()
@@ -398,21 +454,33 @@ class Database:
                 "WHERE status='claimed' AND claimed_at <= ?",
                 (stale_before,),
             )
+            filters = ["status = 'pending'", "scheduled_at <= ?"]
+            parameters: list[object] = [now]
+            if room_id is not None:
+                filters.append("room_id = ?")
+                parameters.append(room_id)
+            if group_name is not None:
+                filters.append("target_group_name = ?")
+                parameters.append(group_name)
+            parameters.append(limit)
             rows = conn.execute(
-                "SELECT * FROM send_jobs WHERE status = 'pending' AND scheduled_at <= ? "
+                f"SELECT * FROM send_jobs WHERE {' AND '.join(filters)} "
                 "ORDER BY scheduled_at LIMIT ?",
-                (now, limit),
+                parameters,
             ).fetchall()
             jobs: list[SendJob] = []
             for row in rows:
-                conn.execute(
+                cursor = conn.execute(
                     "UPDATE send_jobs SET status='claimed', claimed_at=? WHERE job_id=? AND status='pending'",
                     (now, row["job_id"]),
                 )
+                if cursor.rowcount != 1:
+                    continue
                 jobs.append(
                     SendJob(
                         job_id=row["job_id"],
                         room_id=row["room_id"],
+                        target_group_name=row["target_group_name"],
                         content=row["content"],
                         scheduled_at=datetime.fromisoformat(row["scheduled_at"]),
                         status="claimed",
@@ -427,13 +495,20 @@ class Database:
             if success:
                 conn.execute("UPDATE send_jobs SET status='sent', last_error='' WHERE job_id=?", (job_id,))
             else:
-                retry_delay = min(30, 2 ** min(5, self._job_retry_count(conn, job_id)))
-                next_attempt = (datetime.now(timezone.utc) + timedelta(minutes=retry_delay)).isoformat()
-                conn.execute(
-                    "UPDATE send_jobs SET status='pending', retry_count=retry_count+1, "
-                    "last_error=?, scheduled_at=?, claimed_at=NULL WHERE job_id=?",
-                    (error, next_attempt, job_id),
-                )
+                retry_count = self._job_retry_count(conn, job_id)
+                if retry_count >= MAX_AUTOMATIC_RETRIES:
+                    conn.execute(
+                        "UPDATE send_jobs SET status='failed', last_error=?, claimed_at=NULL WHERE job_id=?",
+                        (f"自动重试已达上限（{MAX_AUTOMATIC_RETRIES} 次）：{error}", job_id),
+                    )
+                else:
+                    retry_delay = min(30, 2 ** retry_count)
+                    next_attempt = (datetime.now(timezone.utc) + timedelta(minutes=retry_delay)).isoformat()
+                    conn.execute(
+                        "UPDATE send_jobs SET status='pending', retry_count=retry_count+1, "
+                        "last_error=?, scheduled_at=?, claimed_at=NULL WHERE job_id=?",
+                        (error, next_attempt, job_id),
+                    )
 
     @staticmethod
     def _job_retry_count(conn: sqlite3.Connection, job_id: str) -> int:

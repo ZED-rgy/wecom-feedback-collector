@@ -1,8 +1,9 @@
 import os
+import sqlite3
 import tempfile
 import unittest
 from unittest.mock import patch
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from wecom_feedback.config import Settings
@@ -110,6 +111,71 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(job.room_id, "room-1")
         self.assertEqual(self.db.counts()["send_jobs"], 1)
 
+    def test_duplicate_summary_job_is_reused(self):
+        workflow = WorkflowService(self.settings, self.db, DryRunBot())
+        scheduled_at = datetime.now(timezone.utc)
+        first = workflow.schedule_summary(scheduled_at=scheduled_at, content="同一份摘要")
+        second = workflow.schedule_summary(
+            scheduled_at=scheduled_at + timedelta(seconds=2),
+            content="同一份摘要",
+        )
+        self.assertEqual(first.job_id, second.job_id)
+        self.assertEqual(self.db.counts()["send_jobs"], 1)
+
+    def test_due_jobs_are_scoped_to_current_group(self):
+        self.db.create_send_job(SendJob(
+            job_id="other-group", room_id="other-room", content="旧群摘要",
+            scheduled_at=datetime.now(timezone.utc), target_group_name="其他群",
+        ))
+        self.db.create_send_job(SendJob(
+            job_id="current-group", room_id="room-1", content="当前群摘要",
+            scheduled_at=datetime.now(timezone.utc), target_group_name="客户群",
+        ))
+        jobs = self.db.claim_due_jobs(room_id="room-1", group_name="客户群")
+        self.assertEqual([job.job_id for job in jobs], ["current-group"])
+
+    def test_automatic_retry_stops_after_three_failures(self):
+        job = SendJob(
+            job_id="retry-limit", room_id="room-1", content="摘要",
+            scheduled_at=datetime.now(timezone.utc), target_group_name="客户群",
+        )
+        self.db.create_send_job(job)
+        for _ in range(4):
+            claimed = self.db.claim_job(job.job_id)
+            self.assertIsNotNone(claimed)
+            self.db.finish_job(job.job_id, success=False, error="企微暂不可用")
+            if self.db.get_job(job.job_id).status == "pending":
+                with self.db.connect() as conn:
+                    conn.execute(
+                        "UPDATE send_jobs SET scheduled_at=? WHERE job_id=?",
+                        (datetime.now(timezone.utc).isoformat(), job.job_id),
+                    )
+        stored = self.db.get_job(job.job_id)
+        self.assertEqual(stored.status, "failed")
+        self.assertEqual(stored.retry_count, 3)
+
+    def test_legacy_pending_jobs_are_cancelled_during_schema_migration(self):
+        legacy_path = Path(self.temp_dir.name) / "legacy.db"
+        conn = sqlite3.connect(legacy_path)
+        try:
+            conn.execute(
+                "CREATE TABLE send_jobs (job_id TEXT PRIMARY KEY, room_id TEXT NOT NULL, "
+                "content TEXT NOT NULL, scheduled_at TEXT NOT NULL, status TEXT NOT NULL, "
+                "retry_count INTEGER NOT NULL DEFAULT 0, last_error TEXT NOT NULL DEFAULT '', claimed_at TEXT)"
+            )
+            conn.execute(
+                "INSERT INTO send_jobs(job_id,room_id,content,scheduled_at,status) VALUES(?,?,?,?,?)",
+                ("legacy", "room-1", "摘要", datetime.now(timezone.utc).isoformat(), "pending"),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        migrated = Database(legacy_path)
+        migrated.init_schema()
+        job = migrated.get_job("legacy")
+        self.assertEqual(job.status, "cancelled")
+        self.assertIn("缺少目标群快照", job.last_error)
+
     def test_runtime_pulls_archive_and_advances_cursor(self):
         class FakeArchive:
             def pull_messages(self, cursor, limit=100):
@@ -146,6 +212,7 @@ class CoreTests(unittest.TestCase):
             room_id="room-1",
             content="摘要",
             scheduled_at=datetime.now(timezone.utc),
+            target_group_name="客户群",
         )
         self.db.create_send_job(job)
         self.assertEqual(len(self.db.claim_due_jobs()), 1)
@@ -166,6 +233,7 @@ class CoreTests(unittest.TestCase):
         job = SendJob(
             job_id="uncertain-1", room_id="room-1", content="摘要",
             scheduled_at=datetime.now(timezone.utc),
+            target_group_name="客户群",
         )
         self.db.create_send_job(job)
         workflow = WorkflowService(self.settings, self.db, DryRunBot())
@@ -186,6 +254,7 @@ class CoreTests(unittest.TestCase):
         job = SendJob(
             job_id="manual-not-ready", room_id="room-1", content="摘要",
             scheduled_at=datetime.now(timezone.utc),
+            target_group_name="客户群",
         )
         self.db.create_send_job(job)
         claimed = self.db.claim_job(job.job_id)
