@@ -48,6 +48,10 @@ class CoreTests(unittest.TestCase):
         self.assertTrue(mentions_target("请看 @系统反馈助手 这个问题", self.settings.target_account_names))
         self.assertFalse(mentions_target("普通消息", self.settings.target_account_names))
 
+    def test_mentions_target_accepts_local_db_leading_display_name_format(self):
+        self.assertTrue(mentions_target("系统反馈助手\n登录后无法看到订单", self.settings.target_account_names))
+        self.assertFalse(mentions_target("系统反馈助手今天上线了", self.settings.target_account_names))
+
     def test_strip_mention_removes_duplicate_leading_display_name(self):
         self.assertEqual(
             strip_mention("@系统反馈助手 系统反馈助手：登录失败", self.settings.target_account_names),

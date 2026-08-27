@@ -9,7 +9,21 @@ from ..models import RawMessage
 
 def mentions_target(content: str, target_names: tuple[str, ...]) -> bool:
     normalized = content.replace("\u2005", " ").lower()
-    return any(f"@{name.lower()}" in normalized for name in target_names)
+    if any(f"@{name.lower()}" in normalized for name in target_names):
+        return True
+    # WeCom's local message database may store a mention as a leading
+    # display-name line (without the @ glyph), especially for messages sent
+    # by a newly-added external contact. Require a newline and non-empty body
+    # so an ordinary sentence that merely starts with the account name is not
+    # treated as a mention.
+    lines = normalized.splitlines()
+    if len(lines) < 2 or not lines[0].strip():
+        return False
+    first_line = lines[0].strip()
+    return any(
+        first_line == name.lower() and any(line.strip() for line in lines[1:])
+        for name in target_names
+    )
 
 
 class IngestionService:
