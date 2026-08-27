@@ -6,7 +6,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from string import Formatter
 
+from .paths import (
+    config_path,
+    default_database_path,
+    migrate_legacy_installation,
+)
+from .secrets import protect_secret, unprotect_secret
 
+# Kept for callers/tests that explicitly pass a path. Runtime configuration is
+# stored under %LOCALAPPDATA% via _default_env_path().
 ENV_FILE = Path(".env")
 DEFAULT_SUMMARY_TEMPLATE = """【{group_name}反馈进展｜{report_time}】
 
@@ -110,8 +118,14 @@ def validate_config_values(values: dict[str, object]) -> None:
         raise ConfigValidationError(f"摘要模板包含不支持的变量：{', '.join(unknown)}")
 
 
-def load_dotenv(path: Path = ENV_FILE) -> None:
+def _default_env_path() -> Path:
+    migrate_legacy_installation()
+    return config_path()
+
+
+def load_dotenv(path: Path | None = None) -> None:
     """Load simple KEY=VALUE pairs without adding a third-party dependency."""
+    path = path or _default_env_path()
     if not path.exists():
         return
     for raw_line in path.read_text(encoding="utf-8").splitlines():
@@ -144,6 +158,15 @@ def _template_env() -> str:
         return base64.b64decode(encoded).decode("utf-8")
     except (ValueError, UnicodeDecodeError):
         return DEFAULT_SUMMARY_TEMPLATE
+
+
+def _secret_env(plain_name: str, protected_name: str) -> str:
+    protected = os.getenv(protected_name, "").strip()
+    if protected:
+        decoded = unprotect_secret(protected)
+        if decoded:
+            return decoded.strip()
+    return os.getenv(plain_name, "").strip()
 
 
 @dataclass(frozen=True)
@@ -179,11 +202,15 @@ class Settings:
     @classmethod
     def from_env(cls) -> "Settings":
         load_dotenv()
+        raw_database_path = os.getenv("WECOM_DATABASE_PATH", "").strip()
+        database_path = Path(raw_database_path) if raw_database_path else default_database_path()
+        if not database_path.is_absolute():
+            database_path = config_path().parent / database_path
         return cls(
-            database_path=Path(os.getenv("WECOM_DATABASE_PATH", "data/feedback.db")),
+            database_path=database_path,
             archive_enabled=_bool_env("WECOM_ARCHIVE_ENABLED", False),
             archive_corp_id=os.getenv("WECOM_ARCHIVE_CORP_ID", "").strip(),
-            archive_secret=os.getenv("WECOM_ARCHIVE_SECRET", "").strip(),
+            archive_secret=_secret_env("WECOM_ARCHIVE_SECRET", "WECOM_ARCHIVE_SECRET_DPAPI"),
             archive_private_key_path=os.getenv("WECOM_ARCHIVE_PRIVATE_KEY_PATH", "").strip(),
             target_room_id=os.getenv("WECOM_TARGET_ROOM_ID", "").strip(),
             target_group_name=os.getenv("WECOM_TARGET_GROUP_NAME", "").strip(),
@@ -198,7 +225,7 @@ class Settings:
             smart_table_url=os.getenv("WECOM_SMART_TABLE_URL", "").strip(),
             table_bot_api_url=os.getenv("WECOM_TABLE_BOT_API_URL", "").strip(),
             table_bot_id=os.getenv("WECOM_TABLE_BOT_ID", "").strip(),
-            table_bot_secret=os.getenv("WECOM_TABLE_BOT_SECRET", "").strip(),
+            table_bot_secret=_secret_env("WECOM_TABLE_BOT_SECRET", "WECOM_TABLE_BOT_SECRET_DPAPI"),
             local_db_enabled=_bool_env("WECOM_LOCAL_DB_ENABLED", False),
             auto_send_enabled=_bool_env("WECOM_AUTO_SEND_ENABLED", False),
             summary_schedule_mode=os.getenv("WECOM_SUMMARY_SCHEDULE_MODE", "interval").strip() or "interval",
@@ -272,12 +299,14 @@ class Settings:
         }
 
 
-def save_env(values: dict[str, object], path: Path = ENV_FILE) -> None:
+def save_env(values: dict[str, object], path: Path | None = None) -> None:
     """Persist dashboard-editable values; blank secrets leave existing secrets unchanged."""
+    path = path or _default_env_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
     load_dotenv(path)
     validate_config_values(values)
     mapping = {
-        "WECOM_DATABASE_PATH": values.get("database_path", "data/feedback.db"),
+        "WECOM_DATABASE_PATH": values.get("database_path", str(default_database_path())),
         "WECOM_ARCHIVE_ENABLED": str(values.get("archive_enabled", False)).lower(),
         "WECOM_ARCHIVE_CORP_ID": values.get("archive_corp_id", ""),
         "WECOM_ARCHIVE_PRIVATE_KEY_PATH": values.get("archive_private_key_path", ""),
@@ -305,16 +334,24 @@ def save_env(values: dict[str, object], path: Path = ENV_FILE) -> None:
         ).decode("ascii"),
         "WECOM_SUMMARY_DETAIL_LIMIT": values.get("summary_detail_limit", 5),
     }
-    secret = str(values.get("archive_secret", "")).strip()
-    if secret:
-        mapping["WECOM_ARCHIVE_SECRET"] = secret
-    elif os.getenv("WECOM_ARCHIVE_SECRET"):
-        mapping["WECOM_ARCHIVE_SECRET"] = os.environ["WECOM_ARCHIVE_SECRET"]
-    table_bot_secret = str(values.get("table_bot_secret", "")).strip()
-    if table_bot_secret:
-        mapping["WECOM_TABLE_BOT_SECRET"] = table_bot_secret
-    elif os.getenv("WECOM_TABLE_BOT_SECRET"):
-        mapping["WECOM_TABLE_BOT_SECRET"] = os.environ["WECOM_TABLE_BOT_SECRET"]
+    secrets = (
+        ("archive_secret", "WECOM_ARCHIVE_SECRET", "WECOM_ARCHIVE_SECRET_DPAPI"),
+        ("table_bot_secret", "WECOM_TABLE_BOT_SECRET", "WECOM_TABLE_BOT_SECRET_DPAPI"),
+    )
+    for field, plain_name, protected_name in secrets:
+        supplied = str(values.get(field, "") or "").strip()
+        existing = _secret_env(plain_name, protected_name)
+        secret = supplied or existing
+        if not secret:
+            continue
+        protected = protect_secret(secret)
+        if protected:
+            mapping[protected_name] = protected
+        else:
+            # Non-Windows development environments have no DPAPI. Keep the
+            # plaintext fallback only there so tests and local development
+            # remain functional; Windows builds use DPAPI automatically.
+            mapping[plain_name] = secret
     lines = ["# Managed by the local WeCom feedback dashboard", ""]
     lines.extend(f"{key}={str(value).strip()}" for key, value in mapping.items())
     temporary = path.with_name(f".{path.name}.tmp")
@@ -322,3 +359,9 @@ def save_env(values: dict[str, object], path: Path = ENV_FILE) -> None:
     temporary.replace(path)
     for key, value in mapping.items():
         os.environ[key] = str(value)
+    for _plain_name, _protected_name in (
+        ("WECOM_ARCHIVE_SECRET", "WECOM_ARCHIVE_SECRET_DPAPI"),
+        ("WECOM_TABLE_BOT_SECRET", "WECOM_TABLE_BOT_SECRET_DPAPI"),
+    ):
+        if _protected_name in mapping:
+            os.environ.pop(_plain_name, None)

@@ -6,9 +6,8 @@ from logging.handlers import RotatingFileHandler
 import os
 import threading
 import webbrowser
-from pathlib import Path
 
-from .startup import application_home
+from .paths import application_home, ensure_user_data_dirs, user_data_home
 
 
 logger = logging.getLogger("wecom_feedback.desktop")
@@ -48,13 +47,14 @@ def _tray_image():
 def run_desktop(host: str = "127.0.0.1", port: int = 8765, open_browser: bool = True) -> None:
     """Run an embedded configuration window and background tray services."""
     os.chdir(application_home())
-    Path("logs").mkdir(parents=True, exist_ok=True)
+    ensure_user_data_dirs()
+    log_dir = user_data_home() / "logs"
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
         handlers=[
             RotatingFileHandler(
-                Path("logs") / "desktop.log",
+                log_dir / "desktop.log",
                 maxBytes=5 * 1024 * 1024,
                 backupCount=5,
                 encoding="utf-8",

@@ -20,6 +20,7 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
     subparsers.add_parser("init-db", help="create the SQLite schema")
     subparsers.add_parser("health", help="print local configuration and database health")
+    subparsers.add_parser("diagnose-environment", help="check Windows and local runtime prerequisites")
     demo = subparsers.add_parser("demo-ingest", help="ingest one local demo message")
     demo.add_argument("--content", required=True)
     demo.add_argument("--sender", default="演示客户")
@@ -57,6 +58,11 @@ def main(argv: list[str] | None = None) -> None:
         return
     if args.command == "health":
         print(json.dumps(check_health(settings, database).as_dict(), ensure_ascii=False, indent=2))
+        return
+    if args.command == "diagnose-environment":
+        from .environment import check_environment
+
+        print(json.dumps(check_environment().as_dict(), ensure_ascii=False, indent=2))
         return
     if args.command == "demo-ingest":
         message = RawMessage(

@@ -48,7 +48,15 @@ Windows 桌面发送使用 [windows_ui.py](wecom_feedback/adapters/windows_ui.py
 .\\build_windows.ps1
 ```
 
-脚本会把产物复制为项目根目录下的 `WeComFeedbackCollector.exe`，这样它可以直接使用同目录的 `.env` 和 `data`。桌面程序可以全天后台采集，但企微账号发送仍依赖交互式桌面：Windows 必须已登录且未锁屏；企微可以最小化，发送时程序会短暂恢复并切换到目标群。
+脚本会把产物复制为项目根目录下的 `WeComFeedbackCollector.exe`，开发运行时仍可使用项目目录；正式安装后配置、数据库和日志会使用当前用户的 `%LOCALAPPDATA%\\WeComFeedbackCollector`。桌面程序可以全天后台采集，但企微账号发送仍依赖交互式桌面：Windows 必须已登录且未锁屏；企微可以最小化，发送时程序会短暂恢复并切换到目标群。
+
+## 对外分发准备
+
+独立 EXE 适合内部测试；正式交付建议制作 Windows 安装包。程序配置、SQLite 数据库和日志默认迁移到当前用户的 `%LOCALAPPDATA%\\WeComFeedbackCollector`，不会要求用户向 `Program Files` 写入文件。首次启动后在配置控制台填写该电脑已登录的企微账号、目标群和智能表格连接；不要分发开发机的 `.env`、`data` 或 `logs`。
+
+Windows 版本保存机器人 Secret 时优先使用 DPAPI（绑定当前 Windows 用户），并兼容读取旧版明文配置。安装包应包含 WebView2 检查、开机启动快捷方式、卸载入口和版本号；发布前建议使用代码签名证书，降低 SmartScreen/杀毒软件误报。可通过 `python -m wecom_feedback diagnose-environment` 检查 Windows、企微进程、用户目录写入权限和 WebView2 状态。
+
+本地数据库接收依赖已登录的 Windows 企微客户端，属于非官方本地读取方式；企微升级或安全软件策略变化可能导致适配失效。接收可以后台运行，但自动发送仍需要 Windows 处于已登录、未锁屏的交互式会话。正式发布前应在另一台电脑完成至少 24 小时的接收、重启、断网、企微升级和锁屏场景测试，并准备进程崩溃后的任务计划自动重启策略。
 
 ## 产品界面
 

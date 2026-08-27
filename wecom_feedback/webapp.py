@@ -446,6 +446,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
             from .health import check_health
 
             return self._json(check_health(settings, database).as_dict())
+        if path == "/api/environment":
+            from .environment import check_environment
+
+            return self._json(check_environment().as_dict())
         if path == "/api/dashboard":
             return self._json(_dashboard_snapshot(settings, database))
         if path == "/api/feedback":
