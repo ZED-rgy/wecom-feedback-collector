@@ -80,6 +80,13 @@ class CliSmartTableBot:
                 error = error_payload.get("error")
                 if isinstance(error, dict) and error.get("message"):
                     raise SmartTableError(str(error["message"]))
+                # The WeCom CLI may return a top-level errcode/errmsg object
+                # even when the process exits non-zero. Prefer that useful
+                # diagnostic over the last JSON brace (the old fallback).
+                for key in ("errmsg", "message", "help_message"):
+                    detail = error_payload.get(key)
+                    if isinstance(detail, str) and detail.strip():
+                        raise SmartTableError(detail.strip())
             detail = output.splitlines()
             raise SmartTableError(detail[-1] if detail else f"wecom-cli exit code {result.returncode}")
         try:

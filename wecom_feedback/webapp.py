@@ -497,6 +497,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
             return self._json(MANUAL_SEND_QUEUE.status())
         if path in {"/", "/index.html"}:
             body = (WEB_ROOT / "index.html").read_bytes()
+            # This label means credentials are configured, not that the last
+            # smart-table request succeeded. Connectivity is verified on the
+            # summary page and surfaced there as a detailed warning.
+            body = body.replace("已连接".encode("utf-8"), "已配置".encode("utf-8"))
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
@@ -579,6 +583,15 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
                 receiver = WindowsWeComLocalDbReceiver(settings, lambda _message: False)
                 return self._json(receiver.diagnose().as_dict())
+            if path == "/api/table/diagnose":
+                if not settings.table_integration_enabled:
+                    return self._json({"configured": False, "reachable": False, "error": "智能表格同步未启用"})
+                try:
+                    bot = build_bot(settings)
+                    fields = bot.list_fields() if hasattr(bot, "list_fields") else []
+                    return self._json({"configured": True, "reachable": True, "field_count": len(fields), "error": ""})
+                except Exception as exc:
+                    return self._json({"configured": True, "reachable": False, "field_count": 0, "error": str(exc)})
             if path == "/api/local-reader/poll":
                 from .adapters.windows_local_db import WindowsWeComLocalDbReceiver
 
