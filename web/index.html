@@ -11,6 +11,13 @@
   <style>
     .refresh-status{color:var(--muted);font-size:11px;white-space:nowrap}
     .runtime-time{display:block;color:var(--muted);font-size:11px;margin-top:2px}
+    .summary-live-status{background:#fff;border:1px solid var(--line);border-radius:14px;padding:15px 18px;margin-bottom:16px;box-shadow:0 4px 16px rgba(18,31,53,.035)}
+    .summary-live-head{display:flex;align-items:center;justify-content:space-between;gap:12px}
+    .summary-live-title strong{display:block;font-size:14px}.summary-live-title span{display:block;color:var(--muted);font-size:12px;margin-top:2px}
+    .summary-live-track{height:6px;background:#edf0f5;border-radius:999px;overflow:hidden;margin:12px 0 10px}.summary-live-bar{height:100%;width:0;background:linear-gradient(90deg,#246bfd,#4f8bff);border-radius:999px;transition:width .25s ease}
+    .summary-live-meta{display:flex;gap:18px;flex-wrap:wrap;color:var(--muted);font-size:11px}.summary-live-meta b{color:var(--ink);font-weight:600;margin-left:3px}
+    .summary-live-steps{display:grid;grid-template-columns:repeat(5,1fr);gap:8px;margin-top:12px}.summary-live-step{min-width:0;border:1px solid var(--line);border-radius:9px;padding:8px 9px;background:#fafbfc}.summary-live-step strong{display:block;font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.summary-live-step span{display:block;color:var(--muted);font-size:10px;margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.summary-live-step .step-dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:#aab3c1;margin-right:5px}.summary-live-step.ok .step-dot{background:var(--green)}.summary-live-step.warning .step-dot{background:var(--amber)}.summary-live-step.error .step-dot{background:var(--red)}.tag.error{background:var(--red-soft);color:var(--red)}
+    @media(max-width:1050px){.summary-live-steps{grid-template-columns:repeat(3,1fr)}}@media(max-width:760px){.summary-live-steps{grid-template-columns:1fr 1fr}.summary-live-meta{gap:8px 14px}}
   </style>
 </head>
 <body>
@@ -47,11 +54,50 @@
       const refreshInterval=10000;
       let inFlight=false;
       let lastSummaryRefresh=0;
+      let lastLiveCompletedAt=0;
+      let refreshStartedAt=0;
       window.__summaryDirty=false;
       function setRefreshLabel(text,failed){
         if(!refreshLabel)return;
         refreshLabel.textContent=text;
         refreshLabel.style.color=failed?'var(--red)':'var(--muted)';
+      }
+      function ensureSummaryLiveStatus(){
+        const page=document.getElementById('page-summary');
+        if(!page||document.getElementById('summary-live-status'))return;
+        const panel=document.createElement('div');
+        panel.id='summary-live-status';
+        panel.className='summary-live-status';
+        panel.innerHTML='<div class="summary-live-head"><div class="summary-live-title"><strong>实时更新状态</strong><span id="summary-live-detail">等待后台状态同步</span></div><span id="summary-live-badge" class="tag pending">准备中</span></div><div class="summary-live-track"><div id="summary-live-bar" class="summary-live-bar"></div></div><div class="summary-live-meta"><span>前端更新<b id="summary-live-refresh">--</b></span><span>企微轮询<b id="summary-live-poll">--</b></span><span>下次刷新<b id="summary-live-next">--</b></span><span>本次耗时<b id="summary-live-duration">--</b></span></div><div id="summary-live-steps" class="summary-live-steps"></div>';
+        page.insertBefore(panel,page.firstElementChild);
+      }
+      function setSummaryProgress(percent,badge,detail,kind){
+        ensureSummaryLiveStatus();
+        const bar=document.getElementById('summary-live-bar');
+        const badgeEl=document.getElementById('summary-live-badge');
+        const detailEl=document.getElementById('summary-live-detail');
+        if(bar)bar.style.width=`${Math.max(0,Math.min(100,percent))}%`;
+        if(badgeEl){badgeEl.textContent=badge;badgeEl.className=`tag ${kind||'pending'}`}
+        if(detailEl)detailEl.textContent=detail;
+      }
+      function renderSummaryStages(){
+        ensureSummaryLiveStatus();
+        const target=document.getElementById('summary-live-steps');
+        const pipeline=state.dashboard&&state.dashboard.pipeline||[];
+        if(!target)return;
+        const names={ok:'已完成',warning:'需关注',error:'异常',paused:'已暂停'};
+        target.innerHTML=pipeline.map((item,index)=>`<div class="summary-live-step ${esc(item.status)}"><strong><span class="step-dot"></span>${index+1}. ${esc(item.name)}</strong><span>${esc(names[item.status]||item.status)} · ${esc(item.detail)}</span></div>`).join('');
+        const poll=state.dashboard&&state.dashboard.local_reader&&state.dashboard.local_reader.last_poll_at;
+        const pollEl=document.getElementById('summary-live-poll');
+        if(pollEl)pollEl.textContent=fmt(poll);
+      }
+      function updateSummaryCountdown(){
+        const nextEl=document.getElementById('summary-live-next');
+        if(!nextEl)return;
+        if(inFlight){nextEl.textContent='处理中';return}
+        if(!lastLiveCompletedAt){nextEl.textContent='--';return}
+        const seconds=Math.max(0,Math.ceil((lastLiveCompletedAt+refreshInterval-Date.now())/1000));
+        nextEl.textContent=seconds?`${seconds} 秒后`:'即将刷新';
       }
       function updateRuntimeTimes(){
         const d=state.dashboard;
@@ -69,25 +115,43 @@
       async function refreshLive(){
         if(document.hidden||inFlight||!['dashboard','feedback','summary','logs'].includes(state.page))return;
         inFlight=true;
+        refreshStartedAt=Date.now();
         setRefreshLabel('正在刷新后台状态…',false);
+        if(state.page==='summary')setSummaryProgress(15,'处理中','正在读取企微消息和后台运行状态…','pending');
         try{
           await loadCore();
           updateRuntimeTimes();
+          if(state.page==='summary'){
+            renderSummaryStages();
+            setSummaryProgress(65,'处理中','后台状态已读取，正在检查摘要数据…','pending');
+          }
           if(state.page==='summary'&&!window.__summaryDirty&&Date.now()-lastSummaryRefresh>=30000){
             await loadSummary();
             lastSummaryRefresh=Date.now();
+            setSummaryProgress(100,'已完成','摘要和统计数据已更新','ok');
+          }else if(state.page==='summary'&&window.__summaryDirty){
+            setSummaryProgress(100,'有新数据','检测到新数据，但未覆盖你正在编辑的摘要','warning');
           }
           if(state.page==='logs')await loadActivity();
-          setRefreshLabel(`已更新：${new Date().toLocaleTimeString('zh-CN')}`,false);
+          lastLiveCompletedAt=Date.now();
+          const refreshTime=new Date().toLocaleTimeString('zh-CN');
+          const refreshTimeEl=document.getElementById('summary-live-refresh');
+          const durationEl=document.getElementById('summary-live-duration');
+          if(refreshTimeEl)refreshTimeEl.textContent=refreshTime;
+          if(durationEl)durationEl.textContent=`${((lastLiveCompletedAt-refreshStartedAt)/1000).toFixed(1)} 秒`;
+          setRefreshLabel(`已更新：${refreshTime}`,false);
         }catch(error){
           console.warn('自动刷新失败',error);
+          if(state.page==='summary')setSummaryProgress(100,'刷新失败','本次刷新失败，请点击右上角“刷新”重试','error');
           setRefreshLabel('自动刷新失败，请点击“刷新”',true);
         }finally{inFlight=false}
       }
+      ensureSummaryLiveStatus();
       document.getElementById('summary-content')?.addEventListener('input',()=>{window.__summaryDirty=true});
       document.addEventListener('visibilitychange',()=>{if(!document.hidden)refreshLive()});
       window.setTimeout(refreshLive,3000);
       window.setInterval(refreshLive,refreshInterval);
+      window.setInterval(updateSummaryCountdown,1000);
       window.__refreshLive=refreshLive;
     })();
   </script>
