@@ -16,7 +16,7 @@ DEFAULT_SUMMARY_TEMPLATE = """【{group_name}反馈进展｜{report_time}】
 今日已完成：{completed_today} 项
 当前任务总数：{total} 项
 
-近 {interval_hours} 小时新增：
+自上次摘要后新增：
 {recent_items}
 
 需要重点跟进：
