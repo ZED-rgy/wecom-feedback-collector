@@ -1,0 +1,47 @@
+name: Build Windows release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to update
+        required: true
+        default: v0.1.1
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-publish:
+    runs-on: windows-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[windows,desktop,build]"
+
+      - name: Run tests
+        run: python -m unittest discover -s tests -q
+
+      - name: Build executable
+        run: python -m PyInstaller --noconfirm --clean WeComFeedbackCollector.spec
+
+      - name: Upload release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        shell: pwsh
+        run: |
+          Copy-Item "WeComFeedbackCollector_配置清单.md" "WeComFeedbackCollector_Config_Checklist.md"
+          gh release upload "$env:RELEASE_TAG" "dist\WeComFeedbackCollector.exe" "WeComFeedbackCollector_Config_Checklist.md" --repo "$env:GITHUB_REPOSITORY" --clobber
+          gh release edit "$env:RELEASE_TAG" --repo "$env:GITHUB_REPOSITORY" --draft=false --latest
+
