@@ -313,6 +313,12 @@ class BackgroundWatchdog:
     def stop(self) -> None:
         self._stop.set()
         thread = self._thread
+        if thread and thread.is_alive() and thread is not threading.current_thread():
+            # Wait briefly for an in-flight job to commit its final status so
+            # callers (and the desktop shutdown path) do not observe a stale
+            # ``pending`` state after the worker has reported completion.
+            thread.join(timeout=3)
+        thread = self._thread
         if thread and thread.is_alive():
             thread.join(timeout=3)
 

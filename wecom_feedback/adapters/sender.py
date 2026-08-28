@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import sys
 from typing import Protocol
 
 from ..config import Settings
@@ -19,7 +20,15 @@ class DryRunSender:
         return True
 
     def send_text(self, room_id: str, content: str) -> None:
-        print(f"[dry-run] send to room={room_id}:\n{content}")
+        output = f"[dry-run] send to room={room_id}:\n{content}"
+        try:
+            print(output)
+        except UnicodeEncodeError:
+            # GitHub Windows runners and some legacy terminals use cp1252 or
+            # another narrow code page.  Dry-run diagnostics must never turn
+            # a successful test into a failed send because of console output.
+            encoding = sys.stdout.encoding or "utf-8"
+            print(output.encode(encoding, errors="replace").decode(encoding))
 
 
 class DisabledSender:

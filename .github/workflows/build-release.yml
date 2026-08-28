@@ -30,6 +30,8 @@ jobs:
           python -m pip install -e ".[windows,desktop,build]"
 
       - name: Run tests
+        env:
+          PYTHONIOENCODING: utf-8
         run: python -m unittest discover -s tests -q
 
       - name: Build executable
@@ -44,4 +46,3 @@ jobs:
           Copy-Item "WeComFeedbackCollector_配置清单.md" "WeComFeedbackCollector_Config_Checklist.md"
           gh release upload "$env:RELEASE_TAG" "dist\WeComFeedbackCollector.exe" "WeComFeedbackCollector_Config_Checklist.md" --repo "$env:GITHUB_REPOSITORY" --clobber
           gh release edit "$env:RELEASE_TAG" --repo "$env:GITHUB_REPOSITORY" --draft=false --latest
-
