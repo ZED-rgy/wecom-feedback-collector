@@ -210,7 +210,14 @@ class _ProcessMemory:
             int(mbi.BaseAddress or 0), int(mbi.RegionSize), int(mbi.State), int(mbi.Protect), int(mbi.Type)
         )
 
-    def regions(self, maximum_address: int = 0x80000000) -> Iterable[_MemoryRegion]:
+    def regions(self, maximum_address: int | None = None) -> Iterable[_MemoryRegion]:
+        # The packaged application is normally 64-bit.  The old 2 GiB limit
+        # silently skipped the heap on machines where the WeCom client uses
+        # addresses above the 32-bit range.  VirtualQueryEx only walks mapped
+        # regions, so using the full user-mode range does not imply a full
+        # byte-by-byte scan by itself.
+        if maximum_address is None:
+            maximum_address = 0x7FFFFFFFFFFF if ctypes.sizeof(ctypes.c_void_p) >= 8 else 0xFFFFFFFF
         address = 0
         while address < maximum_address:
             region = self.region_at(address)
@@ -480,6 +487,34 @@ def _looks_like_key(candidate: bytes) -> bool:
     )
 
 
+def _candidate_keys_from_region(data: bytes, first_page: bytes) -> list[bytes]:
+    """Return keys in one memory region that decrypt the current DB header.
+
+    wxSQLite3 keys are normally allocator-aligned.  An eight-byte stride keeps
+    the broad fallback affordable while still covering the layouts used by
+    current WeCom clients; the final cryptographic verification prevents
+    unrelated 16-byte values from being accepted.
+    """
+    found: list[bytes] = []
+    for offset in range(0, len(data) - 15, 8):
+        candidate = data[offset : offset + 16]
+        if not _looks_like_key(candidate) or not _quick_verify_key(candidate, first_page):
+            continue
+        if _verify_key(candidate, first_page) and candidate not in found:
+            found.append(candidate)
+    return found
+
+
+def _executable_pointer_size(executable: Path) -> int:
+    """Read the PE bitness without loading or executing the client binary."""
+    data = executable.read_bytes()
+    if data[:2] != b"MZ":
+        return 4
+    pe = struct.unpack_from("<I", data, 0x3C)[0]
+    magic = struct.unpack_from("<H", data, pe + 24)[0]
+    return 8 if magic == 0x20B else 4
+
+
 def _scan_key(first_page: bytes) -> tuple[int, bytes, str]:
     processes = _wxwork_processes()
     if not processes:
@@ -488,38 +523,75 @@ def _scan_key(first_page: bytes) -> tuple[int, bytes, str]:
     for pid, _working_set in processes:
         try:
             module_base, executable = _module_info(pid)
-            vtable = module_base + _db_key_manager_vtable_rva(executable)
-            pointer = struct.pack("<I", vtable)
             with _ProcessMemory(pid) as process:
+                # The manager/vtable path is fast and remains useful for
+                # known client versions.  It is deliberately only an
+                # optimisation: WeCom updates can move the key outside the
+                # manager object or change the RTTI layout.
                 candidate_regions: dict[int, _MemoryRegion] = {}
+                scanned_regions: set[int] = set()
+                try:
+                    vtable = module_base + _db_key_manager_vtable_rva(executable)
+                    pointer_size = _executable_pointer_size(executable)
+                    pointer = struct.pack("<Q" if pointer_size == 8 else "<I", vtable)
+                    for region in process.regions():
+                        if not region.writable_private or region.size > 64 * 1024 * 1024:
+                            continue
+                        data = process.read(region.base, region.size)
+                        position = data.find(pointer)
+                        while position >= 0:
+                            object_address = region.base + position
+                            object_region = process.region_at(object_address)
+                            if object_region and object_region.writable_private:
+                                candidate_regions[object_region.base] = object_region
+                            position = data.find(pointer, position + 1)
+                    for region in candidate_regions.values():
+                        scanned_regions.add(region.base)
+                        data = process.read(region.base, region.size)
+                        for candidate in _candidate_keys_from_region(data, first_page):
+                            versions = sorted(
+                                (
+                                    child.name
+                                    for child in executable.parent.iterdir()
+                                    if child.is_dir() and re.fullmatch(r"\d+(?:\.\d+){2,}", child.name)
+                                ),
+                                reverse=True,
+                            )
+                            version = versions[0] if versions else executable.parent.name
+                            return pid, candidate, version
+                except (OSError, ValueError, struct.error, WindowsLocalDbError) as exc:
+                    # Continue with the version-independent fallback below.
+                    last_error = str(exc)
+
+                # Version-independent fallback.  Some clients keep the key
+                # in a heap allocation that is not reachable from the RTTI
+                # object, and newer 64-bit builds may not expose the expected
+                # x86-style DbKeyManager layout at all.
                 for region in process.regions():
-                    if not region.writable_private or region.size > 64 * 1024 * 1024:
+                    if (
+                        region.base in scanned_regions
+                        or not region.writable_private
+                        or region.size > 256 * 1024 * 1024
+                    ):
                         continue
                     data = process.read(region.base, region.size)
-                    position = data.find(pointer)
-                    while position >= 0:
-                        object_address = region.base + position
-                        object_region = process.region_at(object_address)
-                        if object_region and object_region.writable_private:
-                            candidate_regions[object_region.base] = object_region
-                        position = data.find(pointer, position + 1)
-                for region in candidate_regions.values():
-                    data = process.read(region.base, region.size)
-                    for offset in range(0, len(data) - 15, 8):
-                        candidate = data[offset : offset + 16]
-                        if _looks_like_key(candidate) and _quick_verify_key(candidate, first_page):
-                            if _verify_key(candidate, first_page):
-                                versions = sorted(
-                                    (
-                                        child.name
-                                        for child in executable.parent.iterdir()
-                                        if child.is_dir() and re.fullmatch(r"\d+(?:\.\d+){2,}", child.name)
-                                    ),
-                                    reverse=True,
-                                )
-                                version = versions[0] if versions else executable.parent.name
-                                return pid, candidate, version
-            last_error = "已定位密钥管理器，但未找到可验证的消息库密钥"
+                    if not data:
+                        continue
+                    for candidate in _candidate_keys_from_region(data, first_page):
+                        versions = sorted(
+                            (
+                                child.name
+                                for child in executable.parent.iterdir()
+                                if child.is_dir() and re.fullmatch(r"\d+(?:\.\d+){2,}", child.name)
+                            ),
+                            reverse=True,
+                        )
+                        version = versions[0] if versions else executable.parent.name
+                        return pid, candidate, version
+            last_error = (
+                "已找到企微进程和消息库，但未找到可验证密钥；请完全退出并重新登录企微后重试，"
+                "并确认本程序与企微使用相同权限运行。若仍失败，可能是当前企微版本暂不兼容。"
+            )
         except (OSError, ValueError, struct.error, WindowsLocalDbError) as exc:
             last_error = str(exc)
     raise WindowsLocalDbError(last_error or "无法从企微进程读取数据库密钥")
