@@ -710,6 +710,9 @@ class WindowsWeComLocalDbReceiver:
         self.settings = settings
         self.on_message = on_message
         self._key: bytes | None = None
+        self._key_error = ""
+        self._key_error_at = 0.0
+        self._key_retry_cooldown = 60.0
         self._pid: int | None = None
         self._data_directory: Path | None = None
         self._client_version = ""
@@ -719,12 +722,18 @@ class WindowsWeComLocalDbReceiver:
         self._last_sequence = 0
 
     def _ensure_key(self) -> tuple[Path, bytes]:
+        if self._key_error and time.monotonic() - self._key_error_at < self._key_retry_cooldown:
+            raise WindowsLocalDbError(self._key_error)
         directories = _discover_data_directories()
         if not directories:
-            raise WindowsLocalDbError("未找到 Documents\\WXWork 下的消息数据库")
+            error = WindowsLocalDbError("未找到 Documents\\WXWork 下的消息数据库")
+            self._key_error = str(error)
+            self._key_error_at = time.monotonic()
+            raise error
         if self._data_directory in directories and self._key:
             first_page = (self._data_directory / "message.db").read_bytes()[:PAGE_SIZE]
             if _verify_key(self._key, first_page):
+                self._key_error = ""
                 return self._data_directory, self._key
         last_error = ""
         for directory in directories:
@@ -738,8 +747,12 @@ class WindowsWeComLocalDbReceiver:
             self._key = key
             self._data_directory = directory
             self._client_version = version
+            self._key_error = ""
             return directory, key
-        raise WindowsLocalDbError(last_error or "本机消息数据库密钥验证失败")
+        error = WindowsLocalDbError(last_error or "本机消息数据库密钥验证失败")
+        self._key_error = str(error)
+        self._key_error_at = time.monotonic()
+        raise error
 
     @staticmethod
     def _snapshot_database(source: Path, key: bytes) -> bytes:
